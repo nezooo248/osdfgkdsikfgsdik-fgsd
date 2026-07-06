@@ -16,6 +16,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
@@ -27,67 +28,69 @@ import org.bukkit.plugin.RegisteredServiceProvider;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * SuperShop : shop GUI + /sell, economie via Vault (EssentialsX).
+ * SuperShop v2 : gros menus (double coffre), menu de transaction par objet,
+ * /vendre (coffre de vente), tous les blocs du jeu, spawners, economie Vault.
  * A mettre dans : SuperShop/java/fr/shop/SuperShop.java
  *
- * Clic gauche = acheter 1 | clic droit = acheter 32 | shift+gauche = acheter 64
- * Prix coherents : un bloc vaut toujours 9x l'objet (4x pour le quartz), en achat ET en vente.
- * /sell        vend l'objet tenu en main
- * /sell all    vend tout ce qui est vendable dans l'inventaire
+ * /shop     ouvre le shop
+ * /vendre   ouvre un coffre : depose tes objets, ferme -> tu es paye
+ * /sell     vend l'objet en main | /sell all vend tout le vendable
  */
 public class SuperShop extends LoadedPlugin implements Listener {
 
-    private static final double SELL_RATIO = 0.5; // vente = 50% du prix d'achat (modifiable)
+    private static final double SELL_RATIO = 0.5;   // vente = 50% de l'achat
+    private static final int MAX_AMOUNT = 64;
 
     private final Map<Material, Double> buyPrices = new EnumMap<>(Material.class);
     private final Map<String, List<Material>> categories = new LinkedHashMap<>();
     private final Map<String, String> categoryNames = new LinkedHashMap<>();
     private final Map<String, Material> categoryIcons = new LinkedHashMap<>();
+    private final Set<Material> blacklist = new HashSet<>();
 
-    private double defaultSpawnerPrice = 50000;
+    private double defaultSpawnerPrice = 75000;
 
     private EconomyHook eco;
     private NamespacedKey keyPrice;
-    private NamespacedKey keyMob;
+    private NamespacedKey keyTag;
 
     @Override
     public void onEnable() {
         keyPrice = new NamespacedKey(getHost(), "shop_price");
-        keyMob = new NamespacedKey(getHost(), "shop_mob");
+        keyTag = new NamespacedKey(getHost(), "shop_tag");
 
         eco = new EconomyHook();
         if (!eco.setup(getServer())) {
-            getLogger().warning("Vault + une economie (EssentialsX) sont requis ! Le shop ne pourra pas gerer l'argent.");
+            getLogger().warning("Vault + une economie (EssentialsX) requis ! Le shop ne gerera pas l'argent.");
         }
 
+        buildBlacklist();
         buildPrices();
         registerListener(this);
 
         registerCommand("shop", (sender, cmd, label, args) -> {
-            if (!(sender instanceof Player p)) {
-                sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED));
-                return true;
-            }
-            openMain(p);
+            if (sender instanceof Player p) openMain(p);
+            else sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED));
             return true;
         });
-
+        registerCommand("vendre", (sender, cmd, label, args) -> {
+            if (sender instanceof Player p) openSellChest(p);
+            else sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED));
+            return true;
+        });
         registerCommand("sell", (sender, cmd, label, args) -> {
-            if (!(sender instanceof Player p)) {
-                sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED));
-                return true;
-            }
-            if (args.length > 0 && args[0].equalsIgnoreCase("all")) {
-                sellAll(p);
-            } else {
-                sellHand(p);
-            }
+            if (!(sender instanceof Player p)) { sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED)); return true; }
+            if (args.length > 0 && args[0].equalsIgnoreCase("all")) sellAll(p);
+            else sellHand(p);
             return true;
         });
     }
@@ -99,10 +102,25 @@ public class SuperShop extends LoadedPlugin implements Listener {
         categories.computeIfAbsent(cat, k -> new ArrayList<>()).add(m);
     }
 
-    /** Un bloc compresse = count x le prix de l'objet (coherence achat/vente garantie). */
     private void registerBlock(String cat, Material block, Material item, int count) {
         Double ip = buyPrices.get(item);
         if (ip != null) register(cat, block, ip * count);
+    }
+
+    private void buildBlacklist() {
+        String[] names = {
+            "AIR", "CAVE_AIR", "VOID_AIR", "BEDROCK", "BARRIER", "LIGHT",
+            "COMMAND_BLOCK", "CHAIN_COMMAND_BLOCK", "REPEATING_COMMAND_BLOCK",
+            "STRUCTURE_BLOCK", "STRUCTURE_VOID", "JIGSAW", "DEBUG_STICK",
+            "BUDDING_AMETHYST", "REINFORCED_DEEPSLATE", "END_PORTAL_FRAME",
+            "SPAWNER", "PETRIFIED_OAK_SLAB", "FARMLAND", "DIRT_PATH",
+            "INFESTED_STONE", "INFESTED_COBBLESTONE", "INFESTED_STONE_BRICKS",
+            "INFESTED_MOSSY_STONE_BRICKS", "INFESTED_CRACKED_STONE_BRICKS",
+            "INFESTED_CHISELED_STONE_BRICKS", "INFESTED_DEEPSLATE"
+        };
+        for (String n : names) {
+            try { blacklist.add(Material.valueOf(n)); } catch (IllegalArgumentException ignored) {}
+        }
     }
 
     private void buildPrices() {
@@ -110,30 +128,29 @@ public class SuperShop extends LoadedPlugin implements Listener {
         categoryNames.put("bois", "Bois");                    categoryIcons.put("bois", Material.OAK_LOG);
         categoryNames.put("nourriture", "Nourriture");        categoryIcons.put("nourriture", Material.BREAD);
         categoryNames.put("mobs", "Loot de mobs");            categoryIcons.put("mobs", Material.ROTTEN_FLESH);
-        categoryNames.put("construction", "Construction");    categoryIcons.put("construction", Material.STONE);
         categoryNames.put("redstone", "Redstone");            categoryIcons.put("redstone", Material.REDSTONE);
         categoryNames.put("divers", "Divers");                categoryIcons.put("divers", Material.ENDER_PEARL);
+        categoryNames.put("tousblocs", "TOUS les blocs");     categoryIcons.put("tousblocs", Material.GRASS_BLOCK);
         categoryNames.put("spawners", "Spawners");            categoryIcons.put("spawners", Material.SPAWNER);
 
-        // --- Minerais / gemmes / lingots (prix unitaires, economie moyenne) ---
-        register("minerais", Material.COAL, 20);
-        register("minerais", Material.CHARCOAL, 20);
-        register("minerais", Material.RAW_COPPER, 15);
-        register("minerais", Material.COPPER_INGOT, 20);
-        register("minerais", Material.RAW_IRON, 40);
-        register("minerais", Material.IRON_INGOT, 50);
-        register("minerais", Material.RAW_GOLD, 90);
-        register("minerais", Material.GOLD_INGOT, 100);
-        register("minerais", Material.REDSTONE, 25);
-        register("minerais", Material.LAPIS_LAZULI, 20);
-        register("minerais", Material.QUARTZ, 20);
-        register("minerais", Material.DIAMOND, 1000);
-        register("minerais", Material.EMERALD, 250);
-        register("minerais", Material.AMETHYST_SHARD, 60);
-        register("minerais", Material.NETHERITE_SCRAP, 2000);
-        register("minerais", Material.NETHERITE_INGOT, 8000);
+        // --- Minerais / gemmes / lingots (prix eleves) ---
+        register("minerais", Material.COAL, 30);
+        register("minerais", Material.CHARCOAL, 30);
+        register("minerais", Material.RAW_COPPER, 25);
+        register("minerais", Material.COPPER_INGOT, 30);
+        register("minerais", Material.RAW_IRON, 60);
+        register("minerais", Material.IRON_INGOT, 75);
+        register("minerais", Material.RAW_GOLD, 140);
+        register("minerais", Material.GOLD_INGOT, 150);
+        register("minerais", Material.REDSTONE, 35);
+        register("minerais", Material.LAPIS_LAZULI, 30);
+        register("minerais", Material.QUARTZ, 30);
+        register("minerais", Material.DIAMOND, 1500);
+        register("minerais", Material.EMERALD, 400);
+        register("minerais", Material.AMETHYST_SHARD, 90);
+        register("minerais", Material.NETHERITE_SCRAP, 3000);
+        register("minerais", Material.NETHERITE_INGOT, 12000);
 
-        // --- Blocs compresses (9x, sauf quartz 4x) ---
         registerBlock("minerais", Material.COAL_BLOCK, Material.COAL, 9);
         registerBlock("minerais", Material.RAW_COPPER_BLOCK, Material.RAW_COPPER, 9);
         registerBlock("minerais", Material.COPPER_BLOCK, Material.COPPER_INGOT, 9);
@@ -149,417 +166,505 @@ public class SuperShop extends LoadedPlugin implements Listener {
         registerBlock("minerais", Material.AMETHYST_BLOCK, Material.AMETHYST_SHARD, 4);
         registerBlock("minerais", Material.NETHERITE_BLOCK, Material.NETHERITE_INGOT, 9);
 
-        // --- Bois (1 buche = 4 planches) ---
+        // --- Bois ---
         Material[][] woods = {
-            {Material.OAK_LOG, Material.OAK_PLANKS},
-            {Material.SPRUCE_LOG, Material.SPRUCE_PLANKS},
-            {Material.BIRCH_LOG, Material.BIRCH_PLANKS},
-            {Material.JUNGLE_LOG, Material.JUNGLE_PLANKS},
-            {Material.ACACIA_LOG, Material.ACACIA_PLANKS},
-            {Material.DARK_OAK_LOG, Material.DARK_OAK_PLANKS},
-            {Material.MANGROVE_LOG, Material.MANGROVE_PLANKS},
-            {Material.CHERRY_LOG, Material.CHERRY_PLANKS},
+            {Material.OAK_LOG, Material.OAK_PLANKS}, {Material.SPRUCE_LOG, Material.SPRUCE_PLANKS},
+            {Material.BIRCH_LOG, Material.BIRCH_PLANKS}, {Material.JUNGLE_LOG, Material.JUNGLE_PLANKS},
+            {Material.ACACIA_LOG, Material.ACACIA_PLANKS}, {Material.DARK_OAK_LOG, Material.DARK_OAK_PLANKS},
+            {Material.MANGROVE_LOG, Material.MANGROVE_PLANKS}, {Material.CHERRY_LOG, Material.CHERRY_PLANKS},
         };
-        for (Material[] w : woods) {
-            register("bois", w[0], 16);
-            register("bois", w[1], 4);
-        }
-        register("bois", Material.CRIMSON_STEM, 16);
-        register("bois", Material.WARPED_STEM, 16);
-        register("bois", Material.BAMBOO, 3);
+        for (Material[] w : woods) { register("bois", w[0], 24); register("bois", w[1], 6); }
+        register("bois", Material.CRIMSON_STEM, 24);
+        register("bois", Material.WARPED_STEM, 24);
+        register("bois", Material.BAMBOO, 4);
 
         // --- Nourriture ---
-        register("nourriture", Material.WHEAT, 5);
+        register("nourriture", Material.WHEAT, 8);
         registerBlock("nourriture", Material.HAY_BLOCK, Material.WHEAT, 9);
-        register("nourriture", Material.BREAD, 15);
-        register("nourriture", Material.APPLE, 20);
-        register("nourriture", Material.GOLDEN_APPLE, 800);
-        register("nourriture", Material.CARROT, 5);
-        register("nourriture", Material.POTATO, 5);
-        register("nourriture", Material.BAKED_POTATO, 8);
-        register("nourriture", Material.BEETROOT, 5);
-        register("nourriture", Material.BEEF, 12);
-        register("nourriture", Material.COOKED_BEEF, 20);
-        register("nourriture", Material.PORKCHOP, 12);
-        register("nourriture", Material.COOKED_PORKCHOP, 20);
-        register("nourriture", Material.CHICKEN, 10);
-        register("nourriture", Material.COOKED_CHICKEN, 16);
-        register("nourriture", Material.MUTTON, 10);
-        register("nourriture", Material.SALMON, 10);
-        register("nourriture", Material.COD, 8);
-        register("nourriture", Material.SUGAR_CANE, 4);
-        register("nourriture", Material.SUGAR, 5);
-        register("nourriture", Material.EGG, 6);
-        register("nourriture", Material.MELON_SLICE, 3);
-        register("nourriture", Material.PUMPKIN, 12);
-        register("nourriture", Material.SWEET_BERRIES, 5);
-        register("nourriture", Material.HONEY_BOTTLE, 20);
+        register("nourriture", Material.BREAD, 20);
+        register("nourriture", Material.APPLE, 30);
+        register("nourriture", Material.GOLDEN_APPLE, 1200);
+        register("nourriture", Material.CARROT, 8);
+        register("nourriture", Material.POTATO, 8);
+        register("nourriture", Material.BEETROOT, 8);
+        register("nourriture", Material.BEEF, 18);
+        register("nourriture", Material.COOKED_BEEF, 28);
+        register("nourriture", Material.PORKCHOP, 18);
+        register("nourriture", Material.COOKED_PORKCHOP, 28);
+        register("nourriture", Material.CHICKEN, 14);
+        register("nourriture", Material.COOKED_CHICKEN, 22);
+        register("nourriture", Material.MUTTON, 14);
+        register("nourriture", Material.SALMON, 14);
+        register("nourriture", Material.COD, 12);
+        register("nourriture", Material.SUGAR_CANE, 6);
+        register("nourriture", Material.EGG, 8);
+        register("nourriture", Material.MELON_SLICE, 4);
+        register("nourriture", Material.PUMPKIN, 16);
+        register("nourriture", Material.SWEET_BERRIES, 8);
+        register("nourriture", Material.HONEY_BOTTLE, 30);
 
         // --- Loot de mobs ---
-        register("mobs", Material.ROTTEN_FLESH, 3);
-        register("mobs", Material.BONE, 8);
+        register("mobs", Material.ROTTEN_FLESH, 5);
+        register("mobs", Material.BONE, 12);
         registerBlock("mobs", Material.BONE_BLOCK, Material.BONE, 9);
-        register("mobs", Material.STRING, 6);
-        register("mobs", Material.SPIDER_EYE, 8);
-        register("mobs", Material.GUNPOWDER, 20);
-        register("mobs", Material.SLIME_BALL, 10);
+        register("mobs", Material.STRING, 10);
+        register("mobs", Material.SPIDER_EYE, 12);
+        register("mobs", Material.GUNPOWDER, 30);
+        register("mobs", Material.SLIME_BALL, 16);
         registerBlock("mobs", Material.SLIME_BLOCK, Material.SLIME_BALL, 9);
-        register("mobs", Material.ENDER_PEARL, 60);
-        register("mobs", Material.BLAZE_ROD, 40);
-        register("mobs", Material.GHAST_TEAR, 150);
-        register("mobs", Material.MAGMA_CREAM, 20);
-        register("mobs", Material.PHANTOM_MEMBRANE, 30);
-        register("mobs", Material.LEATHER, 8);
-        register("mobs", Material.FEATHER, 4);
-        register("mobs", Material.INK_SAC, 6);
-        register("mobs", Material.PRISMARINE_SHARD, 12);
-        register("mobs", Material.PRISMARINE_CRYSTALS, 20);
-        register("mobs", Material.NETHER_STAR, 30000);
-        register("mobs", Material.WITHER_SKELETON_SKULL, 2000);
-        register("mobs", Material.SHULKER_SHELL, 400);
-
-        // --- Construction ---
-        register("construction", Material.DIRT, 1);
-        register("construction", Material.COBBLESTONE, 2);
-        register("construction", Material.STONE, 3);
-        register("construction", Material.GRANITE, 3);
-        register("construction", Material.DIORITE, 3);
-        register("construction", Material.ANDESITE, 3);
-        register("construction", Material.DEEPSLATE, 3);
-        register("construction", Material.SAND, 3);
-        register("construction", Material.RED_SAND, 3);
-        register("construction", Material.GRAVEL, 3);
-        register("construction", Material.GLASS, 4);
-        register("construction", Material.SANDSTONE, 6);
-        register("construction", Material.NETHERRACK, 2);
-        register("construction", Material.OBSIDIAN, 50);
-        register("construction", Material.CRYING_OBSIDIAN, 120);
-        register("construction", Material.CLAY_BALL, 4);
-        register("construction", Material.BRICK, 8);
-        register("construction", Material.TERRACOTTA, 6);
-        register("construction", Material.ICE, 4);
-        register("construction", Material.PACKED_ICE, 20);
-        register("construction", Material.MOSS_BLOCK, 15);
-        register("construction", Material.CALCITE, 5);
-        register("construction", Material.TUFF, 3);
+        register("mobs", Material.ENDER_PEARL, 90);
+        register("mobs", Material.BLAZE_ROD, 60);
+        register("mobs", Material.GHAST_TEAR, 220);
+        register("mobs", Material.MAGMA_CREAM, 30);
+        register("mobs", Material.PHANTOM_MEMBRANE, 45);
+        register("mobs", Material.LEATHER, 12);
+        register("mobs", Material.FEATHER, 6);
+        register("mobs", Material.INK_SAC, 8);
+        register("mobs", Material.PRISMARINE_SHARD, 18);
+        register("mobs", Material.PRISMARINE_CRYSTALS, 30);
+        register("mobs", Material.NETHER_STAR, 45000);
+        register("mobs", Material.SHULKER_SHELL, 600);
 
         // --- Redstone ---
-        register("redstone", Material.REDSTONE_TORCH, 30);
-        register("redstone", Material.REPEATER, 90);
-        register("redstone", Material.COMPARATOR, 130);
-        register("redstone", Material.PISTON, 200);
-        register("redstone", Material.STICKY_PISTON, 250);
-        register("redstone", Material.HOPPER, 300);
-        register("redstone", Material.DISPENSER, 200);
-        register("redstone", Material.DROPPER, 150);
-        register("redstone", Material.OBSERVER, 180);
-        register("redstone", Material.LEVER, 20);
-        register("redstone", Material.STONE_BUTTON, 10);
-        register("redstone", Material.TRIPWIRE_HOOK, 20);
-        register("redstone", Material.TARGET, 60);
-        register("redstone", Material.SLIME_BLOCK, buyPrices.getOrDefault(Material.SLIME_BLOCK, 90.0));
+        register("redstone", Material.REDSTONE_TORCH, 45);
+        register("redstone", Material.REPEATER, 130);
+        register("redstone", Material.COMPARATOR, 190);
+        register("redstone", Material.PISTON, 300);
+        register("redstone", Material.STICKY_PISTON, 380);
+        register("redstone", Material.HOPPER, 450);
+        register("redstone", Material.DISPENSER, 300);
+        register("redstone", Material.DROPPER, 220);
+        register("redstone", Material.OBSERVER, 260);
+        register("redstone", Material.LEVER, 30);
+        register("redstone", Material.STONE_BUTTON, 15);
+        register("redstone", Material.TARGET, 90);
 
         // --- Divers ---
-        register("divers", Material.TORCH, 5);
-        register("divers", Material.STICK, 2);
-        register("divers", Material.FLINT, 6);
-        register("divers", Material.PAPER, 6);
-        register("divers", Material.BOOK, 30);
-        register("divers", Material.NAME_TAG, 500);
-        register("divers", Material.EXPERIENCE_BOTTLE, 100);
-        register("divers", Material.ENDER_EYE, 120);
-        register("divers", Material.BLAZE_POWDER, 25);
-        register("divers", Material.GLOWSTONE_DUST, 10);
-        register("divers", Material.GLOWSTONE, 40);
-        register("divers", Material.NETHER_BRICK, 8);
-        register("divers", Material.BOOKSHELF, 120);
-        register("divers", Material.ITEM_FRAME, 40);
-        register("divers", Material.ARMOR_STAND, 60);
-        register("divers", Material.LANTERN, 30);
-        register("divers", Material.CHAIN, 40);
+        register("divers", Material.TORCH, 8);
+        register("divers", Material.STICK, 3);
+        register("divers", Material.FLINT, 9);
+        register("divers", Material.PAPER, 9);
+        register("divers", Material.BOOK, 45);
+        register("divers", Material.NAME_TAG, 800);
+        register("divers", Material.EXPERIENCE_BOTTLE, 150);
+        register("divers", Material.ENDER_EYE, 180);
+        register("divers", Material.BLAZE_POWDER, 35);
+        register("divers", Material.GLOWSTONE_DUST, 15);
+        register("divers", Material.BOOKSHELF, 180);
+        register("divers", Material.ITEM_FRAME, 60);
+        register("divers", Material.ARMOR_STAND, 90);
+        register("divers", Material.LANTERN, 45);
+        register("divers", Material.CHAIN, 60);
 
-        // --- Prix spawners specifiques (les autres = defaut) ---
-        // (les cles sont des EntityType, geres a l'ouverture de la categorie)
+        // --- TOUS LES BLOCS (auto) ---
+        List<Material> allBlocks = new ArrayList<>();
+        for (Material m : Material.values()) {
+            if (!m.isBlock() || !m.isItem()) continue;
+            if (blacklist.contains(m)) continue;
+            if (m.name().endsWith("_SPAWN_EGG")) continue;
+            if (m.isAir()) continue;
+            if (!buyPrices.containsKey(m)) {
+                buyPrices.put(m, fallbackPrice(m));
+            }
+            allBlocks.add(m);
+        }
+        allBlocks.sort(Comparator.comparing(Enum::name));
+        categories.put("tousblocs", allBlocks);
+    }
+
+    /** Prix estime pour un bloc non defini a la main (modifiable ensuite). */
+    private double fallbackPrice(Material m) {
+        String n = m.name();
+        if (n.contains("ORE")) return 350;
+        if (n.endsWith("_SLAB")) return 12;
+        if (n.endsWith("_STAIRS")) return 32;
+        if (n.endsWith("_WALL")) return 22;
+        if (n.contains("GLASS")) return 20;
+        if (n.contains("WOOL") || n.contains("CARPET")) return 18;
+        if (n.contains("CONCRETE")) return 35;
+        if (n.contains("TERRACOTTA")) return 28;
+        if (n.contains("LOG") || n.contains("WOOD") || n.contains("STEM") || n.contains("PLANKS")) return 18;
+        if (n.contains("BRICK")) return 24;
+        return 25;
     }
 
     private double spawnerPrice(EntityType et) {
         switch (et) {
-            case BLAZE: return 100000;
-            case WITHER_SKELETON: return 250000;
-            case ENDERMAN: return 120000;
-            case IRON_GOLEM: return 150000;
-            case GUARDIAN: case ELDER_GUARDIAN: return 300000;
-            case ZOMBIE: case SKELETON: case SPIDER: case CREEPER: return 75000;
+            case BLAZE: return 130000;
+            case WITHER_SKELETON: return 300000;
+            case ENDERMAN: return 150000;
+            case IRON_GOLEM: return 180000;
+            case GUARDIAN: case ELDER_GUARDIAN: return 350000;
+            case ZOMBIE: case SKELETON: case SPIDER: case CREEPER: return 90000;
             default: return defaultSpawnerPrice;
         }
     }
 
-    // ======================= GUI =======================
+    private double priceOf(Material m) { return buyPrices.getOrDefault(m, 0.0); }
+
+    // ======================= GUI : MENU PRINCIPAL =======================
 
     private void openMain(Player p) {
-        ShopHolder holder = new ShopHolder("MENU", 0);
-        Inventory inv = Bukkit.createInventory(holder, 27,
-                Component.text("Shop").color(NamedTextColor.DARK_PURPLE));
-        holder.inv = inv;
+        ShopHolder h = new ShopHolder("MENU");
+        Inventory inv = Bukkit.createInventory(h, 54, Component.text("\u25AA Shop \u25AA").color(NamedTextColor.DARK_PURPLE));
+        h.inv = inv;
+        fill(inv, filler());
 
-        int slot = 10;
+        int[] slots = {20, 21, 22, 23, 24, 29, 30, 31};
+        int i = 0;
         for (String cat : categoryNames.keySet()) {
-            Material icon = categoryIcons.getOrDefault(cat, Material.PAPER);
-            ItemStack it = new ItemStack(icon);
-            ItemMeta meta = it.getItemMeta();
-            meta.displayName(Component.text(categoryNames.get(cat))
-                    .color(NamedTextColor.YELLOW).decoration(TextDecoration.ITALIC, false));
-            meta.lore(List.of(Component.text("Clique pour ouvrir")
-                    .color(NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false)));
-            meta.getPersistentDataContainer().set(keyMob, PersistentDataType.STRING, "CAT:" + cat);
-            it.setItemMeta(meta);
-            inv.setItem(slot, it);
-            slot++;
-            if (slot == 17) slot = 19;
+            if (i >= slots.length) break;
+            ItemStack it = named(categoryIcons.getOrDefault(cat, Material.PAPER),
+                    categoryNames.get(cat), NamedTextColor.YELLOW,
+                    "Clique pour ouvrir");
+            tag(it, "CAT:" + cat);
+            inv.setItem(slots[i++], it);
         }
+        inv.setItem(49, named(Material.EMERALD, "Vendre vos objets (/vendre)", NamedTextColor.GREEN, "Ouvre un coffre de vente"));
+        tag(inv.getItem(49), "OPENSELL");
         p.openInventory(inv);
     }
 
+    // ======================= GUI : CATEGORIE =======================
+
     private void openCategory(Player p, String cat, int page) {
         List<ItemStack> items = new ArrayList<>();
-
         if (cat.equals("spawners")) {
             for (EntityType et : EntityType.values()) {
                 Class<?> cls = et.getEntityClass();
                 if (cls == null || !Mob.class.isAssignableFrom(cls)) continue;
-                items.add(buildSpawnerDisplay(et));
+                items.add(spawnerDisplay(et));
             }
         } else {
-            List<Material> mats = categories.getOrDefault(cat, List.of());
-            for (Material m : mats) {
-                items.add(buildItemDisplay(m));
-            }
+            for (Material m : categories.getOrDefault(cat, List.of())) items.add(itemDisplay(m));
         }
 
         int perPage = 45;
         int pages = Math.max(1, (int) Math.ceil(items.size() / (double) perPage));
         page = Math.max(0, Math.min(page, pages - 1));
 
-        ShopHolder holder = new ShopHolder(cat, page);
-        Inventory inv = Bukkit.createInventory(holder, 54,
-                Component.text(categoryNames.getOrDefault(cat, cat)).color(NamedTextColor.DARK_PURPLE));
-        holder.inv = inv;
+        ShopHolder h = new ShopHolder("CAT");
+        h.category = cat; h.page = page;
+        Inventory inv = Bukkit.createInventory(h, 54,
+                Component.text(categoryNames.getOrDefault(cat, cat) + "  (" + (page + 1) + "/" + pages + ")")
+                        .color(NamedTextColor.DARK_PURPLE));
+        h.inv = inv;
 
-        int from = page * perPage;
-        int to = Math.min(from + perPage, items.size());
-        int slot = 0;
-        for (int i = from; i < to; i++) {
-            inv.setItem(slot++, items.get(i));
-        }
+        int from = page * perPage, to = Math.min(from + perPage, items.size()), slot = 0;
+        for (int i = from; i < to; i++) inv.setItem(slot++, items.get(i));
 
-        inv.setItem(45, navButton(Material.ARROW, "Precedent", page > 0 ? "PREV" : null));
-        inv.setItem(49, navButton(Material.BARRIER, "Retour au menu", "MENU"));
-        inv.setItem(53, navButton(Material.ARROW, "Suivant", page < pages - 1 ? "NEXT" : null));
+        for (int s = 45; s < 54; s++) inv.setItem(s, filler());
+        if (page > 0) { ItemStack b = named(Material.ARROW, "Precedent", NamedTextColor.AQUA, null); tag(b, "PREV"); inv.setItem(45, b); }
+        ItemStack back = named(Material.BARRIER, "Menu", NamedTextColor.RED, null); tag(back, "MENU"); inv.setItem(49, back);
+        if (page < pages - 1) { ItemStack b = named(Material.ARROW, "Suivant", NamedTextColor.AQUA, null); tag(b, "NEXT"); inv.setItem(53, b); }
 
         p.openInventory(inv);
     }
 
-    private ItemStack navButton(Material mat, String name, String action) {
-        ItemStack it = new ItemStack(mat);
-        ItemMeta meta = it.getItemMeta();
-        meta.displayName(Component.text(name).color(NamedTextColor.AQUA).decoration(TextDecoration.ITALIC, false));
-        if (action != null) {
-            meta.getPersistentDataContainer().set(keyMob, PersistentDataType.STRING, "NAV:" + action);
-        }
-        it.setItemMeta(meta);
-        return it;
+    // ======================= GUI : TRANSACTION (1 objet) =======================
+
+    private void openItem(Player p, Material mat, String mob, String backCat, int backPage) {
+        ShopHolder h = new ShopHolder("ITEM");
+        h.material = mat; h.mob = mob; h.category = backCat; h.page = backPage;
+        h.unit = (mob != null) ? spawnerPrice(EntityType.valueOf(mob)) : priceOf(mat);
+        h.amount = 1;
+        Inventory inv = Bukkit.createInventory(h, 54, Component.text("Transaction").color(NamedTextColor.DARK_PURPLE));
+        h.inv = inv;
+        renderItem(p, h);
+        p.openInventory(inv);
     }
 
-    private ItemStack buildItemDisplay(Material m) {
-        double buy = buyPrices.getOrDefault(m, 0.0);
-        double sell = buy * SELL_RATIO;
-        ItemStack it = new ItemStack(m);
-        ItemMeta meta = it.getItemMeta();
-        meta.lore(priceLore(buy, sell));
-        meta.getPersistentDataContainer().set(keyPrice, PersistentDataType.DOUBLE, buy);
-        it.setItemMeta(meta);
-        return it;
-    }
+    private void renderItem(Player p, ShopHolder h) {
+        Inventory inv = h.inv;
+        fill(inv, filler());
 
-    private ItemStack buildSpawnerDisplay(EntityType et) {
-        double buy = spawnerPrice(et);
-        ItemStack it = new ItemStack(Material.SPAWNER);
-        ItemMeta meta = it.getItemMeta();
-        if (meta instanceof BlockStateMeta bsm && bsm.getBlockState() instanceof CreatureSpawner cs) {
-            cs.setSpawnedType(et);
-            bsm.setBlockState(cs);
-        }
-        meta.displayName(Component.text("Spawner " + pretty(et.name()))
-                .color(NamedTextColor.LIGHT_PURPLE).decoration(TextDecoration.ITALIC, false));
+        // objet au centre
+        ItemStack center = (h.mob != null) ? spawnerItem(EntityType.valueOf(h.mob)) : new ItemStack(h.material, Math.max(1, h.amount));
+        ItemMeta cm = center.getItemMeta();
+        double total = h.unit * h.amount;
         List<Component> lore = new ArrayList<>();
-        lore.add(Component.text("Achat : " + money(buy) + "$").color(NamedTextColor.GREEN).decoration(TextDecoration.ITALIC, false));
-        lore.add(Component.text("Clic gauche pour acheter").color(NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false));
-        meta.lore(lore);
-        meta.getPersistentDataContainer().set(keyPrice, PersistentDataType.DOUBLE, buy);
-        meta.getPersistentDataContainer().set(keyMob, PersistentDataType.STRING, "SPAWN:" + et.name());
-        it.setItemMeta(meta);
-        return it;
+        lore.add(line("Quantite : " + h.amount, NamedTextColor.WHITE));
+        lore.add(line("Prix achat : " + money(total) + "$", NamedTextColor.GREEN));
+        if (h.mob == null) lore.add(line("Prix vente : " + money(total * SELL_RATIO) + "$", NamedTextColor.GOLD));
+        cm.lore(lore);
+        center.setItemMeta(cm);
+        inv.setItem(13, center);
+
+        // boutons - a gauche
+        inv.setItem(29, amountBtn(Material.RED_STAINED_GLASS_PANE, "-1", "AMT:-1"));
+        inv.setItem(20, amountBtn(Material.RED_STAINED_GLASS_PANE, "-16", "AMT:-16"));
+        inv.setItem(11, amountBtn(Material.RED_STAINED_GLASS_PANE, "-64", "AMT:-64"));
+        // boutons + a droite
+        inv.setItem(33, amountBtn(Material.LIME_STAINED_GLASS_PANE, "+1", "AMT:+1"));
+        inv.setItem(24, amountBtn(Material.LIME_STAINED_GLASS_PANE, "+16", "AMT:+16"));
+        inv.setItem(15, amountBtn(Material.LIME_STAINED_GLASS_PANE, "+64", "AMT:+64"));
+
+        // acheter / vendre
+        ItemStack buy = named(Material.EMERALD_BLOCK, "ACHETER  (" + money(total) + "$)", NamedTextColor.GREEN, "Clique pour acheter");
+        tag(buy, "BUY"); inv.setItem(48, buy);
+        if (h.mob == null) {
+            ItemStack sell = named(Material.GOLD_BLOCK, "VENDRE  (" + money(total * SELL_RATIO) + "$)", NamedTextColor.GOLD, "Vend depuis ton inventaire");
+            tag(sell, "SELL"); inv.setItem(50, sell);
+        }
+        ItemStack back = named(Material.BARRIER, "Retour", NamedTextColor.RED, null); tag(back, "BACK"); inv.setItem(45, back);
+
+        double bal = eco.ready() ? eco.balance(p) : 0;
+        inv.setItem(4, named(Material.SUNFLOWER, "Ton argent : " + money(bal) + "$", NamedTextColor.YELLOW, null));
     }
 
-    private List<Component> priceLore(double buy, double sell) {
-        List<Component> lore = new ArrayList<>();
-        lore.add(Component.text("Achat : " + money(buy) + "$").color(NamedTextColor.GREEN).decoration(TextDecoration.ITALIC, false));
-        lore.add(Component.text("Vente : " + money(sell) + "$").color(NamedTextColor.GOLD).decoration(TextDecoration.ITALIC, false));
-        lore.add(Component.empty());
-        lore.add(Component.text("Gauche = 1  |  Droit = 32  |  Shift = 64").color(NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false));
-        return lore;
+    // ======================= GUI : COFFRE DE VENTE (/vendre) =======================
+
+    private void openSellChest(Player p) {
+        ShopHolder h = new ShopHolder("SELL");
+        Inventory inv = Bukkit.createInventory(h, 54,
+                Component.text("Vendre : depose puis ferme").color(NamedTextColor.GOLD));
+        h.inv = inv;
+        p.openInventory(inv);
     }
 
-    // ======================= CLICS =======================
+    private void processSellChest(Player p, Inventory inv) {
+        double total = 0;
+        int sold = 0;
+        ItemStack[] contents = inv.getContents();
+        for (int i = 0; i < contents.length; i++) {
+            ItemStack it = contents[i];
+            if (it == null || it.getType().isAir()) continue;
+            if (sellable(it.getType())) {
+                total += priceOf(it.getType()) * SELL_RATIO * it.getAmount();
+                sold += it.getAmount();
+                inv.setItem(i, null);
+            } else {
+                // objet non vendable : on le rend
+                for (ItemStack rest : p.getInventory().addItem(it).values())
+                    p.getWorld().dropItemNaturally(p.getLocation(), rest);
+                inv.setItem(i, null);
+            }
+        }
+        if (sold > 0 && eco.ready()) {
+            eco.deposit(p, total);
+            p.sendMessage(Component.text("Vendu " + sold + " objets pour " + money(total) + "$").color(NamedTextColor.GOLD));
+        }
+    }
+
+    // ======================= EVENEMENTS =======================
 
     @EventHandler
     public void onDrag(InventoryDragEvent e) {
-        if (e.getView().getTopInventory().getHolder() instanceof ShopHolder) {
+        if (e.getView().getTopInventory().getHolder() instanceof ShopHolder h && !"SELL".equals(h.type))
             e.setCancelled(true);
-        }
     }
 
     @EventHandler
     public void onClick(InventoryClickEvent e) {
-        InventoryHolder topHolder = e.getView().getTopInventory().getHolder();
-        if (!(topHolder instanceof ShopHolder holder)) return;
+        if (!(e.getView().getTopInventory().getHolder() instanceof ShopHolder h)) return;
+        if ("SELL".equals(h.type)) return; // coffre de vente : interactions libres
 
-        e.setCancelled(true); // empeche de voler les items du shop
-
-        if (e.getClickedInventory() == null
-                || !(e.getClickedInventory().getHolder() instanceof ShopHolder)) {
-            return; // clic dans son propre inventaire
-        }
+        e.setCancelled(true);
+        if (e.getClickedInventory() == null || !(e.getClickedInventory().getHolder() instanceof ShopHolder)) return;
         if (!(e.getWhoClicked() instanceof Player p)) return;
 
         ItemStack clicked = e.getCurrentItem();
         if (clicked == null || clicked.getType().isAir() || !clicked.hasItemMeta()) return;
+        String t = clicked.getItemMeta().getPersistentDataContainer().get(keyTag, PersistentDataType.STRING);
+        if (t == null) return;
 
-        var pdc = clicked.getItemMeta().getPersistentDataContainer();
-        String tag = pdc.get(keyMob, PersistentDataType.STRING);
-
-        // Menu principal : ouverture d'une categorie
-        if ("MENU".equals(holder.category)) {
-            if (tag != null && tag.startsWith("CAT:")) {
-                openCategory(p, tag.substring(4), 0);
+        switch (h.type) {
+            case "MENU" -> {
+                if (t.startsWith("CAT:")) openCategory(p, t.substring(4), 0);
+                else if (t.equals("OPENSELL")) openSellChest(p);
             }
-            return;
-        }
-
-        // Navigation
-        if (tag != null && tag.startsWith("NAV:")) {
-            String action = tag.substring(4);
-            switch (action) {
-                case "PREV" -> openCategory(p, holder.category, holder.page - 1);
-                case "NEXT" -> openCategory(p, holder.category, holder.page + 1);
-                case "MENU" -> openMain(p);
+            case "CAT" -> {
+                switch (t) {
+                    case "PREV" -> openCategory(p, h.category, h.page - 1);
+                    case "NEXT" -> openCategory(p, h.category, h.page + 1);
+                    case "MENU" -> openMain(p);
+                    default -> {
+                        if (t.startsWith("ITEM:")) openItem(p, Material.valueOf(t.substring(5)), null, h.category, h.page);
+                        else if (t.startsWith("SPAWN:")) openItem(p, Material.SPAWNER, t.substring(6), h.category, h.page);
+                    }
+                }
             }
-            return;
+            case "ITEM" -> handleItemMenu(p, h, t);
         }
+    }
 
-        // Achat
-        Double unit = pdc.get(keyPrice, PersistentDataType.DOUBLE);
-        if (unit == null) return;
+    private void handleItemMenu(Player p, ShopHolder h, String t) {
+        if (t.startsWith("AMT:")) {
+            int delta = Integer.parseInt(t.substring(4));
+            h.amount = Math.max(1, Math.min(MAX_AMOUNT, h.amount + delta));
+            renderItem(p, h);
+            p.updateInventory();
+        } else if (t.equals("BUY")) {
+            buy(p, h);
+        } else if (t.equals("SELL")) {
+            sellAmount(p, h.material, h.amount);
+        } else if (t.equals("BACK")) {
+            openCategory(p, h.category, h.page);
+        }
+    }
 
-        int amount;
-        if (e.isShiftClick() && e.isLeftClick()) amount = 64;
-        else if (e.isRightClick()) amount = 32;
-        else amount = 1;
-
-        // les spawners s'achetent 1 par 1
-        if (clicked.getType() == Material.SPAWNER) amount = 1;
-
-        buy(p, clicked, unit, amount, tag);
+    @EventHandler
+    public void onClose(InventoryCloseEvent e) {
+        if (e.getInventory().getHolder() instanceof ShopHolder h && "SELL".equals(h.type)
+                && e.getPlayer() instanceof Player p) {
+            processSellChest(p, e.getInventory());
+        }
     }
 
     // ======================= ACHAT / VENTE =======================
 
-    private void buy(Player p, ItemStack display, double unit, int amount, String tag) {
-        if (!eco.ready()) {
-            p.sendMessage(Component.text("Economie indisponible (Vault/EssentialsX manquant).").color(NamedTextColor.RED));
-            return;
-        }
-        double total = unit * amount;
-        if (eco.balance(p) < total) {
-            p.sendMessage(Component.text("Pas assez d'argent ! Il te faut " + money(total) + "$").color(NamedTextColor.RED));
-            return;
-        }
-        if (!eco.withdraw(p, total)) {
-            p.sendMessage(Component.text("Transaction refusee.").color(NamedTextColor.RED));
-            return;
-        }
+    private void buy(Player p, ShopHolder h) {
+        if (!eco.ready()) { p.sendMessage(Component.text("Economie indisponible (Vault/EssentialsX).").color(NamedTextColor.RED)); return; }
+        double total = h.unit * h.amount;
+        if (eco.balance(p) < total) { p.sendMessage(Component.text("Pas assez d'argent (" + money(total) + "$).").color(NamedTextColor.RED)); return; }
+        if (!eco.withdraw(p, total)) { p.sendMessage(Component.text("Transaction refusee.").color(NamedTextColor.RED)); return; }
 
-        ItemStack give;
-        if (display.getType() == Material.SPAWNER && tag != null && tag.startsWith("SPAWN:")) {
-            give = buildSpawnerItem(EntityType.valueOf(tag.substring(6)));
-        } else {
-            give = new ItemStack(display.getType(), amount);
-        }
-
-        Map<Integer, ItemStack> left = p.getInventory().addItem(give);
-        for (ItemStack rest : left.values()) {
+        ItemStack give = (h.mob != null) ? spawnerItem(EntityType.valueOf(h.mob)) : new ItemStack(h.material, h.amount);
+        for (ItemStack rest : p.getInventory().addItem(give).values())
             p.getWorld().dropItemNaturally(p.getLocation(), rest);
-        }
-        p.sendMessage(Component.text("Achete x" + amount + " pour " + money(total) + "$").color(NamedTextColor.GREEN));
+
+        p.sendMessage(Component.text("Achete x" + h.amount + " pour " + money(total) + "$").color(NamedTextColor.GREEN));
+        renderItem(p, h);
+        p.updateInventory();
     }
 
-    private ItemStack buildSpawnerItem(EntityType et) {
-        ItemStack it = new ItemStack(Material.SPAWNER);
-        ItemMeta meta = it.getItemMeta();
-        if (meta instanceof BlockStateMeta bsm && bsm.getBlockState() instanceof CreatureSpawner cs) {
-            cs.setSpawnedType(et);
-            bsm.setBlockState(cs);
-        }
-        meta.displayName(Component.text("Spawner " + pretty(et.name()))
-                .color(NamedTextColor.LIGHT_PURPLE).decoration(TextDecoration.ITALIC, false));
-        it.setItemMeta(meta);
-        return it;
+    private void sellAmount(Player p, Material mat, int wanted) {
+        if (!sellable(mat)) { p.sendMessage(Component.text("Non vendable.").color(NamedTextColor.RED)); return; }
+        int have = count(p, mat);
+        int amount = Math.min(wanted, have);
+        if (amount <= 0) { p.sendMessage(Component.text("Tu n'as pas cet objet.").color(NamedTextColor.RED)); return; }
+        remove(p, mat, amount);
+        double total = priceOf(mat) * SELL_RATIO * amount;
+        eco.deposit(p, total);
+        p.sendMessage(Component.text("Vendu x" + amount + " pour " + money(total) + "$").color(NamedTextColor.GOLD));
     }
 
     private void sellHand(Player p) {
         ItemStack hand = p.getInventory().getItemInMainHand();
-        if (hand == null || hand.getType().isAir()) {
-            p.sendMessage(Component.text("Tiens un objet a vendre en main.").color(NamedTextColor.RED));
-            return;
-        }
-        Double unit = buyPrices.get(hand.getType());
-        if (unit == null || hand.getType() == Material.SPAWNER) {
-            p.sendMessage(Component.text("Cet objet n'est pas vendable.").color(NamedTextColor.RED));
-            return;
+        if (hand == null || hand.getType().isAir() || !sellable(hand.getType())) {
+            p.sendMessage(Component.text("Objet non vendable en main.").color(NamedTextColor.RED)); return;
         }
         int amount = hand.getAmount();
-        double total = unit * SELL_RATIO * amount;
+        double total = priceOf(hand.getType()) * SELL_RATIO * amount;
         p.getInventory().setItemInMainHand(null);
         eco.deposit(p, total);
         p.sendMessage(Component.text("Vendu x" + amount + " pour " + money(total) + "$").color(NamedTextColor.GOLD));
     }
 
     private void sellAll(Player p) {
-        double total = 0;
-        int count = 0;
+        double total = 0; int count = 0;
         ItemStack[] contents = p.getInventory().getContents();
         for (int i = 0; i < contents.length; i++) {
             ItemStack it = contents[i];
-            if (it == null || it.getType().isAir() || it.getType() == Material.SPAWNER) continue;
-            Double unit = buyPrices.get(it.getType());
-            if (unit == null) continue;
-            total += unit * SELL_RATIO * it.getAmount();
+            if (it == null || it.getType().isAir() || !sellable(it.getType())) continue;
+            total += priceOf(it.getType()) * SELL_RATIO * it.getAmount();
             count += it.getAmount();
             p.getInventory().setItem(i, null);
         }
-        if (count == 0) {
-            p.sendMessage(Component.text("Rien de vendable dans ton inventaire.").color(NamedTextColor.RED));
-            return;
-        }
+        if (count == 0) { p.sendMessage(Component.text("Rien de vendable.").color(NamedTextColor.RED)); return; }
         eco.deposit(p, total);
         p.sendMessage(Component.text("Vendu " + count + " objets pour " + money(total) + "$").color(NamedTextColor.GOLD));
     }
 
-    // ======================= UTILS =======================
+    private boolean sellable(Material m) {
+        return m != Material.SPAWNER && !m.name().endsWith("_SPAWN_EGG") && buyPrices.containsKey(m);
+    }
+
+    private int count(Player p, Material m) {
+        int c = 0;
+        for (ItemStack it : p.getInventory().getContents())
+            if (it != null && it.getType() == m) c += it.getAmount();
+        return c;
+    }
+
+    private void remove(Player p, Material m, int amount) {
+        ItemStack[] contents = p.getInventory().getContents();
+        for (int i = 0; i < contents.length && amount > 0; i++) {
+            ItemStack it = contents[i];
+            if (it == null || it.getType() != m) continue;
+            int take = Math.min(amount, it.getAmount());
+            it.setAmount(it.getAmount() - take);
+            amount -= take;
+            if (it.getAmount() <= 0) p.getInventory().setItem(i, null);
+        }
+    }
+
+    // ======================= AFFICHAGE / UTILS =======================
+
+    private ItemStack itemDisplay(Material m) {
+        double buy = priceOf(m);
+        ItemStack it = new ItemStack(m);
+        ItemMeta meta = it.getItemMeta();
+        List<Component> lore = new ArrayList<>();
+        lore.add(line("Achat : " + money(buy) + "$", NamedTextColor.GREEN));
+        lore.add(line("Vente : " + money(buy * SELL_RATIO) + "$", NamedTextColor.GOLD));
+        lore.add(line("Clique pour choisir la quantite", NamedTextColor.GRAY));
+        meta.lore(lore);
+        it.setItemMeta(meta);
+        tag(it, "ITEM:" + m.name());
+        return it;
+    }
+
+    private ItemStack spawnerDisplay(EntityType et) {
+        ItemStack it = spawnerItem(et);
+        ItemMeta meta = it.getItemMeta();
+        List<Component> lore = new ArrayList<>();
+        lore.add(line("Achat : " + money(spawnerPrice(et)) + "$", NamedTextColor.GREEN));
+        lore.add(line("Clique pour acheter", NamedTextColor.GRAY));
+        meta.lore(lore);
+        it.setItemMeta(meta);
+        tag(it, "SPAWN:" + et.name());
+        return it;
+    }
+
+    private ItemStack spawnerItem(EntityType et) {
+        ItemStack it = new ItemStack(Material.SPAWNER);
+        ItemMeta meta = it.getItemMeta();
+        if (meta instanceof BlockStateMeta bsm && bsm.getBlockState() instanceof CreatureSpawner cs) {
+            cs.setSpawnedType(et);
+            bsm.setBlockState(cs);
+        }
+        meta.displayName(line("Spawner " + pretty(et.name()), NamedTextColor.LIGHT_PURPLE));
+        it.setItemMeta(meta);
+        return it;
+    }
+
+    private ItemStack named(Material mat, String name, NamedTextColor color, String loreLine) {
+        ItemStack it = new ItemStack(mat);
+        ItemMeta meta = it.getItemMeta();
+        meta.displayName(line(name, color));
+        if (loreLine != null) meta.lore(List.of(line(loreLine, NamedTextColor.GRAY)));
+        it.setItemMeta(meta);
+        return it;
+    }
+
+    private ItemStack amountBtn(Material mat, String name, String tag) {
+        ItemStack it = named(mat, name, NamedTextColor.WHITE, null);
+        tag(it, tag);
+        return it;
+    }
+
+    private ItemStack filler() {
+        return named(Material.GRAY_STAINED_GLASS_PANE, " ", NamedTextColor.DARK_GRAY, null);
+    }
+
+    private void fill(Inventory inv, ItemStack f) {
+        for (int i = 0; i < inv.getSize(); i++) inv.setItem(i, f);
+    }
+
+    private void tag(ItemStack it, String value) {
+        if (it == null) return;
+        ItemMeta meta = it.getItemMeta();
+        meta.getPersistentDataContainer().set(keyTag, PersistentDataType.STRING, value);
+        it.setItemMeta(meta);
+    }
+
+    private Component line(String s, NamedTextColor c) {
+        return Component.text(s).color(c).decoration(TextDecoration.ITALIC, false);
+    }
 
     private String money(double v) {
-        long l = Math.round(v);
-        return String.format("%,d", l).replace(',', ' ');
+        return String.format("%,d", Math.round(v)).replace(',', ' ');
     }
 
     private String pretty(String enumName) {
@@ -569,24 +674,31 @@ public class SuperShop extends LoadedPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            if (p.getOpenInventory().getTopInventory().getHolder() instanceof ShopHolder h && "SELL".equals(h.type))
+                p.closeInventory();
+        }
         getLogger().info("SuperShop desactive.");
     }
 
     // ======================= CLASSES INTERNES =======================
 
-    /** Marque nos inventaires GUI pour les reconnaitre dans les clics. */
     static class ShopHolder implements InventoryHolder {
-        final String category;
-        final int page;
+        final String type;      // MENU, CAT, ITEM, SELL
+        String category;
+        int page;
+        Material material;
+        String mob;
+        double unit;
+        int amount = 1;
         Inventory inv;
-        ShopHolder(String category, int page) { this.category = category; this.page = page; }
+        ShopHolder(String type) { this.type = type; }
         @Override public Inventory getInventory() { return inv; }
     }
 
-    /** Acces a l'economie Vault par reflexion (pas besoin de Vault a la compilation). */
     static class EconomyHook {
         private Object economy;
-        private Method mGetBalance, mWithdraw, mDeposit;
+        private Method mBal, mWit, mDep;
 
         boolean setup(Server server) {
             for (Class<?> svc : server.getServicesManager().getKnownServices()) {
@@ -596,42 +708,30 @@ public class SuperShop extends LoadedPlugin implements Listener {
                         economy = rsp.getProvider();
                         try {
                             Class<?> ec = economy.getClass();
-                            mGetBalance = ec.getMethod("getBalance", OfflinePlayer.class);
-                            mWithdraw = ec.getMethod("withdrawPlayer", OfflinePlayer.class, double.class);
-                            mDeposit = ec.getMethod("depositPlayer", OfflinePlayer.class, double.class);
-                        } catch (Exception e) {
-                            economy = null;
-                        }
+                            mBal = ec.getMethod("getBalance", OfflinePlayer.class);
+                            mWit = ec.getMethod("withdrawPlayer", OfflinePlayer.class, double.class);
+                            mDep = ec.getMethod("depositPlayer", OfflinePlayer.class, double.class);
+                        } catch (Exception e) { economy = null; }
                     }
                 }
             }
             return ready();
         }
 
-        boolean ready() {
-            return economy != null && mGetBalance != null && mWithdraw != null && mDeposit != null;
-        }
+        boolean ready() { return economy != null && mBal != null && mWit != null && mDep != null; }
 
         double balance(OfflinePlayer p) {
-            try { return ((Number) mGetBalance.invoke(economy, p)).doubleValue(); }
-            catch (Exception e) { return 0; }
+            try { return ((Number) mBal.invoke(economy, p)).doubleValue(); } catch (Exception e) { return 0; }
         }
-
-        boolean withdraw(OfflinePlayer p, double amt) {
-            try { return success(mWithdraw.invoke(economy, p, amt)); }
-            catch (Exception e) { return false; }
+        boolean withdraw(OfflinePlayer p, double a) {
+            try { return success(mWit.invoke(economy, p, a)); } catch (Exception e) { return false; }
         }
-
-        boolean deposit(OfflinePlayer p, double amt) {
-            try { return success(mDeposit.invoke(economy, p, amt)); }
-            catch (Exception e) { return false; }
+        boolean deposit(OfflinePlayer p, double a) {
+            try { return success(mDep.invoke(economy, p, a)); } catch (Exception e) { return false; }
         }
-
-        private boolean success(Object resp) {
-            try {
-                Object b = resp.getClass().getMethod("transactionSuccess").invoke(resp);
-                return !(b instanceof Boolean) || (Boolean) b;
-            } catch (Exception e) { return true; }
+        private boolean success(Object r) {
+            try { Object b = r.getClass().getMethod("transactionSuccess").invoke(r); return !(b instanceof Boolean) || (Boolean) b; }
+            catch (Exception e) { return true; }
         }
     }
 }
