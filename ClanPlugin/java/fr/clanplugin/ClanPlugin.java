@@ -1,4 +1,4 @@
-package fr.clan;
+package fr.clanplugin;
 
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
@@ -58,20 +58,6 @@ public class ClanPlugin extends JavaPlugin {
 
         getServer().getPluginManager().registerEvents(new GUIListener(this), this);
         getServer().getPluginManager().registerEvents(new PlayerListener(this), this);
-
-        // Placeholder chargé par reflection : le code principal ne dépend PAS de PlaceholderAPI.
-        if (getServer().getPluginManager().getPlugin("PlaceholderAPI") != null) {
-            try {
-                Class<?> clazz = Class.forName("fr.clan.ClanExpansion");
-                Object exp = clazz.getConstructor(ClanPlugin.class).newInstance(this);
-                clazz.getMethod("register").invoke(exp);
-                getLogger().info("Placeholder %clan_name% active.");
-            } catch (ClassNotFoundException e) {
-                getLogger().info("ClanExpansion absent : %clan_name% desactive (ajoute le fichier si tu veux les placeholders).");
-            } catch (Throwable t) {
-                getLogger().warning("Placeholders KO : " + t.getMessage());
-            }
-        }
 
         getLogger().info("ClanPlugin active.");
     }
@@ -266,8 +252,8 @@ class ClanManager {
                 if (ls == null) continue;
                 try {
                     Clan clan = new Clan(name, UUID.fromString(ls));
-                    for (String m : cfg.getStringList(path + ".members")) clan.addMember(UUID.fromString(m));
-                    for (String o : cfg.getStringList(path + ".officers")) clan.getOfficers().add(UUID.fromString(o));
+                    for (String mm : cfg.getStringList(path + ".members")) clan.addMember(UUID.fromString(mm));
+                    for (String oo : cfg.getStringList(path + ".officers")) clan.getOfficers().add(UUID.fromString(oo));
                     clans.put(name.toLowerCase(Locale.ROOT), clan);
                     for (UUID u : clan.getMembers()) playerClan.put(u, name.toLowerCase(Locale.ROOT));
                 } catch (IllegalArgumentException ex) {
@@ -575,7 +561,7 @@ class ClanCommand implements CommandExecutor, TabCompleter {
             case SUCCESS:
                 plugin.msg(p, "&aTu as invite &e" + t.getName() + " &adans le clan.");
                 plugin.msg(t, "&eInvitation dans le clan &6" + clan.getName() + "&e !");
-                t.sendMessage(ClanPlugin.c(ClanPlugin.PREFIX + "&7&a/clan accept " + clan.getName() + " &7ou &c/clan deny " + clan.getName()));
+                t.sendMessage(ClanPlugin.c(ClanPlugin.PREFIX + "&a/clan accept " + clan.getName() + " &7ou &c/clan deny " + clan.getName()));
                 break;
             case NO_CLAN: plugin.msg(p, "&cTu n'es dans aucun clan."); break;
             case NO_PERMISSION: plugin.msg(p, "&cSeul le chef ou un bras droit peut inviter."); break;
@@ -712,14 +698,13 @@ class ClanCommand implements CommandExecutor, TabCompleter {
                 case "accept": case "deny":
                     if (s instanceof Player) return filter(new ArrayList<>(m.getInvites(((Player) s).getUniqueId())), a[1]);
                     return Collections.emptyList();
-                case "dissoudre": case "info": {
+                case "dissoudre": case "info":
                     if (s.hasPermission("clan.staff")) {
                         List<String> l = new ArrayList<>();
                         for (Clan cl : m.getClans()) l.add(cl.getName());
                         return filter(l, a[1]);
                     }
                     return Collections.emptyList();
-                }
             }
         }
         return Collections.emptyList();
