@@ -210,6 +210,27 @@ public class SuperShop extends LoadedPlugin implements Listener {
         register("minerais", Material.NETHERITE_SCRAP, 9500);
         register("minerais", Material.NETHERITE_INGOT, 42000);
 
+        // --- Minerais bruts (blocs a miner, obtenables en survie) ---
+        register("minerais", Material.ANCIENT_DEBRIS, 8000);
+        register("minerais", Material.COAL_ORE, 110);
+        register("minerais", Material.DEEPSLATE_COAL_ORE, 120);
+        register("minerais", Material.COPPER_ORE, 95);
+        register("minerais", Material.DEEPSLATE_COPPER_ORE, 105);
+        register("minerais", Material.IRON_ORE, 220);
+        register("minerais", Material.DEEPSLATE_IRON_ORE, 240);
+        register("minerais", Material.GOLD_ORE, 480);
+        register("minerais", Material.DEEPSLATE_GOLD_ORE, 520);
+        register("minerais", Material.NETHER_GOLD_ORE, 300);
+        register("minerais", Material.REDSTONE_ORE, 140);
+        register("minerais", Material.DEEPSLATE_REDSTONE_ORE, 150);
+        register("minerais", Material.LAPIS_ORE, 200);
+        register("minerais", Material.DEEPSLATE_LAPIS_ORE, 220);
+        register("minerais", Material.NETHER_QUARTZ_ORE, 160);
+        register("minerais", Material.DIAMOND_ORE, 5000);
+        register("minerais", Material.DEEPSLATE_DIAMOND_ORE, 5400);
+        register("minerais", Material.EMERALD_ORE, 1600);
+        register("minerais", Material.DEEPSLATE_EMERALD_ORE, 1750);
+
         registerBlock("minerais", Material.COAL_BLOCK, Material.COAL, 9);
         registerBlock("minerais", Material.RAW_COPPER_BLOCK, Material.RAW_COPPER, 9);
         registerBlock("minerais", Material.COPPER_BLOCK, Material.COPPER_INGOT, 9);
@@ -467,7 +488,10 @@ public class SuperShop extends LoadedPlugin implements Listener {
                 if (disp != null) items.add(disp);
             }
         } else {
-            for (Material m : categories.getOrDefault(cat, List.of())) items.add(itemDisplay(m));
+            for (Material m : categories.getOrDefault(cat, List.of())) {
+                if (blacklist.contains(m) || isNonSurvival(m)) continue; // securite affichage
+                items.add(itemDisplay(m));
+            }
         }
 
         int perPage = 45;
