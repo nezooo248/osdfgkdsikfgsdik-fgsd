@@ -594,6 +594,9 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        // IMPORTANT : on retire nos listeners pour ne pas laisser de "listener fantome"
+        // apres un /plreload (ancien classloader) qui casserait les clics du menu.
+        try { org.bukkit.event.HandlerList.unregisterAll(this); } catch (Throwable ignored) {}
         saveData();
         getLogger().info("AuctionHouse desactive (annonces sauvegardees).");
     }
