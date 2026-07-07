@@ -64,7 +64,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
     private final Map<String, Material> categoryIcons = new LinkedHashMap<>();
     private final Set<Material> blacklist = new HashSet<>();
 
-    private double defaultSpawnerPrice = 75000;
+    private double defaultSpawnerPrice = 150000;
 
     private EconomyHook eco;
     private NamespacedKey keyPrice;
@@ -171,7 +171,10 @@ public class SuperShop extends LoadedPlugin implements Listener {
             "SPAWNER", "PETRIFIED_OAK_SLAB", "FARMLAND", "DIRT_PATH",
             "INFESTED_STONE", "INFESTED_COBBLESTONE", "INFESTED_STONE_BRICKS",
             "INFESTED_MOSSY_STONE_BRICKS", "INFESTED_CRACKED_STONE_BRICKS",
-            "INFESTED_CHISELED_STONE_BRICKS", "INFESTED_DEEPSLATE"
+            "INFESTED_CHISELED_STONE_BRICKS", "INFESTED_DEEPSLATE",
+            // --- non obtenables / creatif uniquement ---
+            "TRIAL_SPAWNER", "VAULT", "FROGSPAWN", "DRAGON_EGG",
+            "PLAYER_HEAD", "SUSPICIOUS_SAND", "SUSPICIOUS_GRAVEL", "POWDER_SNOW"
         };
         for (String n : names) {
             try { blacklist.add(Material.valueOf(n)); } catch (IllegalArgumentException ignored) {}
@@ -190,22 +193,22 @@ public class SuperShop extends LoadedPlugin implements Listener {
         categoryNames.put("spawners", "Spawners");            categoryIcons.put("spawners", Material.SPAWNER);
 
         // --- Minerais / gemmes / lingots (prix eleves) ---
-        register("minerais", Material.COAL, 30);
-        register("minerais", Material.CHARCOAL, 30);
-        register("minerais", Material.RAW_COPPER, 25);
-        register("minerais", Material.COPPER_INGOT, 30);
-        register("minerais", Material.RAW_IRON, 60);
-        register("minerais", Material.IRON_INGOT, 75);
-        register("minerais", Material.RAW_GOLD, 140);
-        register("minerais", Material.GOLD_INGOT, 150);
-        register("minerais", Material.REDSTONE, 35);
-        register("minerais", Material.LAPIS_LAZULI, 30);
-        register("minerais", Material.QUARTZ, 30);
-        register("minerais", Material.DIAMOND, 1500);
-        register("minerais", Material.EMERALD, 400);
-        register("minerais", Material.AMETHYST_SHARD, 90);
-        register("minerais", Material.NETHERITE_SCRAP, 3000);
-        register("minerais", Material.NETHERITE_INGOT, 12000);
+        register("minerais", Material.COAL, 80);
+        register("minerais", Material.CHARCOAL, 75);
+        register("minerais", Material.RAW_COPPER, 70);
+        register("minerais", Material.COPPER_INGOT, 95);
+        register("minerais", Material.RAW_IRON, 180);
+        register("minerais", Material.IRON_INGOT, 240);
+        register("minerais", Material.RAW_GOLD, 420);
+        register("minerais", Material.GOLD_INGOT, 500);
+        register("minerais", Material.REDSTONE, 90);
+        register("minerais", Material.LAPIS_LAZULI, 85);
+        register("minerais", Material.QUARTZ, 110);
+        register("minerais", Material.DIAMOND, 4500);
+        register("minerais", Material.EMERALD, 1300);
+        register("minerais", Material.AMETHYST_SHARD, 260);
+        register("minerais", Material.NETHERITE_SCRAP, 9500);
+        register("minerais", Material.NETHERITE_INGOT, 42000);
 
         registerBlock("minerais", Material.COAL_BLOCK, Material.COAL, 9);
         registerBlock("minerais", Material.RAW_COPPER_BLOCK, Material.RAW_COPPER, 9);
@@ -222,137 +225,170 @@ public class SuperShop extends LoadedPlugin implements Listener {
         registerBlock("minerais", Material.AMETHYST_BLOCK, Material.AMETHYST_SHARD, 4);
         registerBlock("minerais", Material.NETHERITE_BLOCK, Material.NETHERITE_INGOT, 9);
 
-        // --- Bois ---
-        Material[][] woods = {
-            {Material.OAK_LOG, Material.OAK_PLANKS}, {Material.SPRUCE_LOG, Material.SPRUCE_PLANKS},
-            {Material.BIRCH_LOG, Material.BIRCH_PLANKS}, {Material.JUNGLE_LOG, Material.JUNGLE_PLANKS},
-            {Material.ACACIA_LOG, Material.ACACIA_PLANKS}, {Material.DARK_OAK_LOG, Material.DARK_OAK_PLANKS},
-            {Material.MANGROVE_LOG, Material.MANGROVE_PLANKS}, {Material.CHERRY_LOG, Material.CHERRY_PLANKS},
-        };
-        for (Material[] w : woods) { register("bois", w[0], 24); register("bois", w[1], 6); }
-        register("bois", Material.CRIMSON_STEM, 24);
-        register("bois", Material.WARPED_STEM, 24);
-        register("bois", Material.BAMBOO, 4);
+        // --- Bois (chaque essence a un prix different) ---
+        register("bois", Material.OAK_LOG, 70);        register("bois", Material.OAK_PLANKS, 18);
+        register("bois", Material.SPRUCE_LOG, 68);     register("bois", Material.SPRUCE_PLANKS, 17);
+        register("bois", Material.BIRCH_LOG, 66);      register("bois", Material.BIRCH_PLANKS, 17);
+        register("bois", Material.JUNGLE_LOG, 74);     register("bois", Material.JUNGLE_PLANKS, 19);
+        register("bois", Material.ACACIA_LOG, 76);     register("bois", Material.ACACIA_PLANKS, 19);
+        register("bois", Material.DARK_OAK_LOG, 80);   register("bois", Material.DARK_OAK_PLANKS, 20);
+        register("bois", Material.MANGROVE_LOG, 82);   register("bois", Material.MANGROVE_PLANKS, 21);
+        register("bois", Material.CHERRY_LOG, 88);     register("bois", Material.CHERRY_PLANKS, 22);
+        register("bois", Material.CRIMSON_STEM, 78);   register("bois", Material.CRIMSON_PLANKS, 20);
+        register("bois", Material.WARPED_STEM, 78);    register("bois", Material.WARPED_PLANKS, 20);
+        register("bois", Material.BAMBOO, 12);
 
         // --- Nourriture ---
-        register("nourriture", Material.WHEAT, 8);
+        register("nourriture", Material.WHEAT, 20);
         registerBlock("nourriture", Material.HAY_BLOCK, Material.WHEAT, 9);
-        register("nourriture", Material.BREAD, 20);
-        register("nourriture", Material.APPLE, 30);
-        register("nourriture", Material.GOLDEN_APPLE, 1200);
-        register("nourriture", Material.CARROT, 8);
-        register("nourriture", Material.POTATO, 8);
-        register("nourriture", Material.BEETROOT, 8);
-        register("nourriture", Material.BEEF, 18);
-        register("nourriture", Material.COOKED_BEEF, 28);
-        register("nourriture", Material.PORKCHOP, 18);
-        register("nourriture", Material.COOKED_PORKCHOP, 28);
-        register("nourriture", Material.CHICKEN, 14);
-        register("nourriture", Material.COOKED_CHICKEN, 22);
-        register("nourriture", Material.MUTTON, 14);
-        register("nourriture", Material.SALMON, 14);
-        register("nourriture", Material.COD, 12);
-        register("nourriture", Material.SUGAR_CANE, 6);
-        register("nourriture", Material.EGG, 8);
-        register("nourriture", Material.MELON_SLICE, 4);
-        register("nourriture", Material.PUMPKIN, 16);
-        register("nourriture", Material.SWEET_BERRIES, 8);
-        register("nourriture", Material.HONEY_BOTTLE, 30);
+        register("nourriture", Material.BREAD, 55);
+        register("nourriture", Material.APPLE, 70);
+        register("nourriture", Material.GOLDEN_APPLE, 3200);
+        register("nourriture", Material.CARROT, 18);
+        register("nourriture", Material.POTATO, 18);
+        register("nourriture", Material.BEETROOT, 16);
+        register("nourriture", Material.BEEF, 45);
+        register("nourriture", Material.COOKED_BEEF, 70);
+        register("nourriture", Material.PORKCHOP, 44);
+        register("nourriture", Material.COOKED_PORKCHOP, 68);
+        register("nourriture", Material.CHICKEN, 35);
+        register("nourriture", Material.COOKED_CHICKEN, 55);
+        register("nourriture", Material.MUTTON, 35);
+        register("nourriture", Material.SALMON, 35);
+        register("nourriture", Material.COD, 30);
+        register("nourriture", Material.SUGAR_CANE, 16);
+        register("nourriture", Material.EGG, 20);
+        register("nourriture", Material.MELON_SLICE, 10);
+        register("nourriture", Material.PUMPKIN, 40);
+        register("nourriture", Material.SWEET_BERRIES, 18);
+        register("nourriture", Material.HONEY_BOTTLE, 75);
 
         // --- Loot de mobs ---
-        register("mobs", Material.ROTTEN_FLESH, 5);
-        register("mobs", Material.BONE, 12);
+        register("mobs", Material.ROTTEN_FLESH, 12);
+        register("mobs", Material.BONE, 30);
         registerBlock("mobs", Material.BONE_BLOCK, Material.BONE, 9);
-        register("mobs", Material.STRING, 10);
-        register("mobs", Material.SPIDER_EYE, 12);
-        register("mobs", Material.GUNPOWDER, 30);
-        register("mobs", Material.SLIME_BALL, 16);
+        register("mobs", Material.STRING, 25);
+        register("mobs", Material.SPIDER_EYE, 30);
+        register("mobs", Material.GUNPOWDER, 80);
+        register("mobs", Material.SLIME_BALL, 45);
         registerBlock("mobs", Material.SLIME_BLOCK, Material.SLIME_BALL, 9);
-        register("mobs", Material.ENDER_PEARL, 90);
-        register("mobs", Material.BLAZE_ROD, 60);
-        register("mobs", Material.GHAST_TEAR, 220);
-        register("mobs", Material.MAGMA_CREAM, 30);
-        register("mobs", Material.PHANTOM_MEMBRANE, 45);
-        register("mobs", Material.LEATHER, 12);
-        register("mobs", Material.FEATHER, 6);
-        register("mobs", Material.INK_SAC, 8);
-        register("mobs", Material.PRISMARINE_SHARD, 18);
-        register("mobs", Material.PRISMARINE_CRYSTALS, 30);
-        register("mobs", Material.NETHER_STAR, 45000);
-        register("mobs", Material.SHULKER_SHELL, 600);
+        register("mobs", Material.ENDER_PEARL, 240);
+        register("mobs", Material.BLAZE_ROD, 160);
+        register("mobs", Material.GHAST_TEAR, 600);
+        register("mobs", Material.MAGMA_CREAM, 85);
+        register("mobs", Material.PHANTOM_MEMBRANE, 130);
+        register("mobs", Material.LEATHER, 30);
+        register("mobs", Material.FEATHER, 16);
+        register("mobs", Material.INK_SAC, 20);
+        register("mobs", Material.PRISMARINE_SHARD, 50);
+        register("mobs", Material.PRISMARINE_CRYSTALS, 85);
+        register("mobs", Material.NETHER_STAR, 120000);
+        register("mobs", Material.SHULKER_SHELL, 1800);
 
         // --- Redstone ---
-        register("redstone", Material.REDSTONE_TORCH, 45);
-        register("redstone", Material.REPEATER, 130);
-        register("redstone", Material.COMPARATOR, 190);
-        register("redstone", Material.PISTON, 300);
-        register("redstone", Material.STICKY_PISTON, 380);
-        register("redstone", Material.HOPPER, 450);
-        register("redstone", Material.DISPENSER, 300);
-        register("redstone", Material.DROPPER, 220);
-        register("redstone", Material.OBSERVER, 260);
-        register("redstone", Material.LEVER, 30);
-        register("redstone", Material.STONE_BUTTON, 15);
-        register("redstone", Material.TARGET, 90);
+        register("redstone", Material.REDSTONE_TORCH, 110);
+        register("redstone", Material.REPEATER, 320);
+        register("redstone", Material.COMPARATOR, 480);
+        register("redstone", Material.PISTON, 750);
+        register("redstone", Material.STICKY_PISTON, 950);
+        register("redstone", Material.HOPPER, 1100);
+        register("redstone", Material.DISPENSER, 720);
+        register("redstone", Material.DROPPER, 540);
+        register("redstone", Material.OBSERVER, 640);
+        register("redstone", Material.LEVER, 70);
+        register("redstone", Material.STONE_BUTTON, 35);
+        register("redstone", Material.TARGET, 220);
 
-        // --- Divers ---
-        register("divers", Material.TORCH, 8);
-        register("divers", Material.STICK, 3);
-        register("divers", Material.FLINT, 9);
-        register("divers", Material.PAPER, 9);
-        register("divers", Material.BOOK, 45);
-        register("divers", Material.NAME_TAG, 800);
-        register("divers", Material.EXPERIENCE_BOTTLE, 150);
-        register("divers", Material.ENDER_PEARL, 90);
-        register("divers", Material.ENDER_EYE, 180);
-        register("divers", Material.BLAZE_POWDER, 35);
-        register("divers", Material.GLOWSTONE_DUST, 15);
-        register("divers", Material.BOOKSHELF, 180);
-        register("divers", Material.ITEM_FRAME, 60);
-        register("divers", Material.ARMOR_STAND, 90);
-        register("divers", Material.LANTERN, 45);
-        register("divers", Material.CHAIN, 60);
+        // --- Divers (ENDER_PEARL retire ici : deja dans "mobs") ---
+        register("divers", Material.TORCH, 18);
+        register("divers", Material.STICK, 8);
+        register("divers", Material.FLINT, 22);
+        register("divers", Material.PAPER, 22);
+        register("divers", Material.BOOK, 110);
+        register("divers", Material.NAME_TAG, 2000);
+        register("divers", Material.EXPERIENCE_BOTTLE, 380);
+        register("divers", Material.ENDER_EYE, 450);
+        register("divers", Material.BLAZE_POWDER, 90);
+        register("divers", Material.GLOWSTONE_DUST, 40);
+        register("divers", Material.BOOKSHELF, 450);
+        register("divers", Material.ITEM_FRAME, 150);
+        register("divers", Material.ARMOR_STAND, 220);
+        register("divers", Material.LANTERN, 110);
+        register("divers", Material.CHAIN, 150);
 
-        // --- TOUS LES BLOCS (auto) ---
+        // --- TOUS LES BLOCS (auto, SANS doublons) ---
+        // On rassemble tout ce qui est deja range dans une categorie pour ne pas le reproposer.
+        Set<Material> already = new HashSet<>();
+        for (List<Material> list : categories.values()) already.addAll(list);
+
         List<Material> allBlocks = new ArrayList<>();
         for (Material m : Material.values()) {
             if (!m.isBlock() || !m.isItem()) continue;
+            if (m.isAir()) continue;
             if (blacklist.contains(m)) continue;
             if (m.name().endsWith("_SPAWN_EGG")) continue;
-            if (m.isAir()) continue;
-            if (!buyPrices.containsKey(m)) {
-                buyPrices.put(m, fallbackPrice(m));
-            }
+            if (already.contains(m)) continue;           // deja dans une autre categorie -> pas de doublon
+            if (!buyPrices.containsKey(m)) buyPrices.put(m, fallbackPrice(m));
             allBlocks.add(m);
         }
         allBlocks.sort(Comparator.comparing(Enum::name));
         categories.put("tousblocs", allBlocks);
     }
 
-    /** Prix estime pour un bloc non defini a la main (modifiable ensuite). */
+    /** Prix estime pour un bloc non defini a la main. Plus haut + unique par bloc. */
     private double fallbackPrice(Material m) {
         String n = m.name();
-        if (n.contains("ORE")) return 350;
-        if (n.endsWith("_SLAB")) return 12;
-        if (n.endsWith("_STAIRS")) return 32;
-        if (n.endsWith("_WALL")) return 22;
-        if (n.contains("GLASS")) return 20;
-        if (n.contains("WOOL") || n.contains("CARPET")) return 18;
-        if (n.contains("CONCRETE")) return 35;
-        if (n.contains("TERRACOTTA")) return 28;
-        if (n.contains("LOG") || n.contains("WOOD") || n.contains("STEM") || n.contains("PLANKS")) return 18;
-        if (n.contains("BRICK")) return 24;
-        return 25;
+        double base;
+        if (n.contains("ORE")) base = 900;
+        else if (n.endsWith("_SLAB")) base = 30;
+        else if (n.endsWith("_STAIRS")) base = 75;
+        else if (n.endsWith("_WALL")) base = 55;
+        else if (n.endsWith("_FENCE_GATE")) base = 70;
+        else if (n.endsWith("_FENCE")) base = 60;
+        else if (n.endsWith("_TRAPDOOR")) base = 80;
+        else if (n.endsWith("_DOOR")) base = 90;
+        else if (n.endsWith("_BUTTON")) base = 25;
+        else if (n.endsWith("_PRESSURE_PLATE")) base = 40;
+        else if (n.endsWith("_SIGN") || n.endsWith("_HANGING_SIGN")) base = 45;
+        else if (n.contains("CONCRETE_POWDER")) base = 55;
+        else if (n.contains("CONCRETE")) base = 85;
+        else if (n.contains("TERRACOTTA")) base = 70;
+        else if (n.contains("GLAZED")) base = 95;
+        else if (n.contains("GLASS")) base = 45;
+        else if (n.contains("WOOL")) base = 45;
+        else if (n.contains("CARPET")) base = 30;
+        else if (n.contains("PLANKS")) base = 42;
+        else if (n.contains("LOG") || n.contains("WOOD") || n.contains("STEM") || n.contains("HYPHAE")) base = 60;
+        else if (n.contains("LEAVES")) base = 22;
+        else if (n.contains("COPPER")) base = 80;
+        else if (n.contains("DEEPSLATE")) base = 48;
+        else if (n.contains("BLACKSTONE")) base = 55;
+        else if (n.contains("BASALT")) base = 45;
+        else if (n.contains("PRISMARINE")) base = 90;
+        else if (n.contains("QUARTZ")) base = 120;
+        else if (n.contains("PURPUR")) base = 95;
+        else if (n.contains("CORAL")) base = 160;
+        else if (n.contains("BRICK")) base = 65;
+        else if (n.contains("SANDSTONE")) base = 60;
+        else if (n.contains("SAND")) base = 32;
+        else if (n.contains("GRAVEL")) base = 30;
+        else if (n.contains("MUSHROOM") || n.contains("FUNGUS") || n.contains("ROOTS")) base = 55;
+        else if (n.contains("FLOWER") || n.contains("TULIP") || n.contains("ORCHID") || n.contains("POPPY")) base = 40;
+        else if (n.contains("SAPLING")) base = 50;
+        else base = 75;
+        // Variation deterministe 0-40% -> chaque bloc a un prix unique
+        int h = Math.floorMod(n.hashCode(), 100);        // 0..99
+        return Math.round(base * (1.0 + h / 100.0 * 0.40));
     }
 
     private double spawnerPrice(EntityType et) {
         switch (et) {
-            case BLAZE: return 130000;
-            case WITHER_SKELETON: return 300000;
-            case ENDERMAN: return 150000;
-            case IRON_GOLEM: return 180000;
-            case GUARDIAN: case ELDER_GUARDIAN: return 350000;
-            case ZOMBIE: case SKELETON: case SPIDER: case CREEPER: return 90000;
+            case BLAZE: return 260000;
+            case WITHER_SKELETON: return 650000;
+            case ENDERMAN: return 320000;
+            case IRON_GOLEM: return 400000;
+            case GUARDIAN: case ELDER_GUARDIAN: return 750000;
+            case ZOMBIE: case SKELETON: case SPIDER: case CREEPER: return 180000;
             default: return defaultSpawnerPrice;
         }
     }
@@ -711,10 +747,10 @@ public class SuperShop extends LoadedPlugin implements Listener {
 
     private double potionPrice(PotionType pt) {
         String n = pt.name();
-        if (n.equals("WATER") || n.equals("MUNDANE") || n.equals("THICK") || n.equals("AWKWARD")) return 100;
-        double base = 350;
-        if (n.startsWith("STRONG_")) base += 200;
-        if (n.startsWith("LONG_")) base += 100;
+        if (n.equals("WATER") || n.equals("MUNDANE") || n.equals("THICK") || n.equals("AWKWARD")) return 250;
+        double base = 900;
+        if (n.startsWith("STRONG_")) base += 500;
+        if (n.startsWith("LONG_")) base += 300;
         return base;
     }
 
