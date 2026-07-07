@@ -512,7 +512,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
         }
         if (sold > 0) {
             eco.deposit(p, total);
-            p.sendMessage(Component.text("Vendu " + sold + " objets pour " + money(total) + "$ (meme prix qu'en boutique)").color(NamedTextColor.GOLD));
+            p.sendMessage(Component.text("Vendu " + sold + " objets pour " + money(total) + "$").color(NamedTextColor.GOLD));
         } else {
             p.sendMessage(Component.text("Rien de vendable : objets rendus.").color(NamedTextColor.YELLOW));
         }
