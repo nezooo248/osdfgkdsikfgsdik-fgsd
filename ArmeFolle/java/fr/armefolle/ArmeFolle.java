@@ -21,7 +21,7 @@ import java.util.List;
 /**
  * /armefolle : marque l'objet tenu en main.
  * Un objet marqué reçoit un lore et n'est PAS drop à la mort (gardé en inventaire).
- * Seuls les OP peuvent utiliser la commande.
+ * Permission requise : armefolle.use
  */
 public class ArmeFolle extends LoadedPlugin implements Listener {
 
@@ -43,9 +43,9 @@ public class ArmeFolle extends LoadedPlugin implements Listener {
                 return true;
             }
 
-            // Vérifie que le joueur est OP
-            if (!player.isOp()) {
-                player.sendMessage(Component.text("Vous devez être OP pour utiliser cette commande.")
+            // Vérification de la permission
+            if (!player.hasPermission("armefolle.use")) {
+                player.sendMessage(Component.text("Vous n'avez pas la permission d'utiliser cette commande.")
                         .color(NamedTextColor.RED));
                 return true;
             }
@@ -62,7 +62,7 @@ public class ArmeFolle extends LoadedPlugin implements Listener {
             // Marque l'objet de façon invisible
             meta.getPersistentDataContainer().set(key, PersistentDataType.BYTE, (byte) 1);
 
-            // Ajoute le lore s'il n'est pas déjà présent
+            // Ajoute le lore si absent
             List<Component> lore = meta.lore() == null
                     ? new ArrayList<>()
                     : new ArrayList<>(meta.lore());
@@ -89,8 +89,8 @@ public class ArmeFolle extends LoadedPlugin implements Listener {
             ItemStack item = iterator.next();
 
             if (isArmeFolle(item)) {
-                event.getItemsToKeep().add(item); // Garde l'objet
-                iterator.remove();                // Empêche le drop
+                event.getItemsToKeep().add(item);
+                iterator.remove();
             }
         }
     }
