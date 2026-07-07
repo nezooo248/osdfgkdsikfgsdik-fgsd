@@ -16,16 +16,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * Construction des menus (menu principal + menu de gestion d'un membre).
- */
 public class ClanGUI {
 
-    // Slots du menu principal
     private static final int INFO_SLOT = 4;
     private static final int[] MEMBER_SLOTS = {19, 20, 21, 22, 23};
 
-    // Slots du menu de gestion
     public static final int HEAD_SLOT = 4;
     public static final int KICK_SLOT = 11;
     public static final int ROLE_SLOT = 15;
@@ -33,9 +28,6 @@ public class ClanGUI {
 
     private ClanGUI() {}
 
-    // ==================================================================
-    //  Menu principal
-    // ==================================================================
     public static void openMain(ClanPlugin plugin, Player viewer, Clan clan) {
         ClanManager manager = plugin.getClanManager();
 
@@ -44,13 +36,10 @@ public class ClanGUI {
         holder.setInventory(inv);
 
         fill(inv);
-
-        // Item d'info du clan
         inv.setItem(INFO_SLOT, infoItem(clan, manager));
 
         boolean canManage = clan.isLeader(viewer.getUniqueId()) || clan.isOfficer(viewer.getUniqueId());
 
-        // Ordre d'affichage : chef -> bras droits -> membres
         List<UUID> ordered = new ArrayList<>();
         ordered.add(clan.getLeader());
         for (UUID u : clan.getOfficers()) if (!ordered.contains(u)) ordered.add(u);
@@ -80,14 +69,10 @@ public class ClanGUI {
         List<String> lore = new ArrayList<>();
         lore.add(Text.c("&7Chef: &f" + manager.getName(clan.getLeader())));
         lore.add(Text.c("&7Membres: &f" + clan.size() + "&7/&f" + ClanManager.MAX_MEMBERS));
-        int officers = clan.getOfficers().size();
-        lore.add(Text.c("&7Bras droits: &f" + officers));
+        lore.add(Text.c("&7Bras droits: &f" + clan.getOfficers().size()));
         return item(Material.OAK_SIGN, "&6&lClan " + clan.getName(), lore);
     }
 
-    // ==================================================================
-    //  Menu de gestion d'un membre
-    // ==================================================================
     public static void openMember(ClanPlugin plugin, Player viewer, Clan clan, UUID target) {
         ClanManager manager = plugin.getClanManager();
 
@@ -101,12 +86,10 @@ public class ClanGUI {
         boolean isLeader = clan.isLeader(viewer.getUniqueId());
         boolean isOfficer = clan.isOfficer(viewer.getUniqueId());
 
-        // Tete du membre
         List<String> headLore = new ArrayList<>();
         headLore.add(Text.c("&7Grade: " + roleColored(targetRole)));
         inv.setItem(HEAD_SLOT, head(manager.getName(target), roleColored(targetRole), headLore, target));
 
-        // Bouton EXCLURE
         boolean canKick = (isLeader && targetRole != Clan.Role.LEADER)
                 || (isOfficer && targetRole == Clan.Role.MEMBER);
         if (canKick) {
@@ -114,7 +97,6 @@ public class ClanGUI {
                     List.of(Text.c("&7Retire ce joueur du clan."))));
         }
 
-        // Bouton GRADE (chef uniquement)
         if (isLeader) {
             if (targetRole == Clan.Role.MEMBER) {
                 inv.setItem(ROLE_SLOT, item(Material.EMERALD, "&a&lPromouvoir bras droit",
@@ -126,29 +108,22 @@ public class ClanGUI {
             }
         }
 
-        // Bouton RETOUR
         inv.setItem(BACK_SLOT, item(Material.ARROW, "&7Retour", List.of()));
 
         viewer.openInventory(inv);
     }
 
-    // ==================================================================
-    //  Permissions d'affichage
-    // ==================================================================
     public static boolean canManage(Clan clan, UUID viewer, UUID target) {
         if (viewer.equals(target)) return false;
         Clan.Role vr = clan.getRole(viewer);
         Clan.Role tr = clan.getRole(target);
         if (vr == null || tr == null) return false;
         if (tr == Clan.Role.LEADER) return false;
-        if (vr == Clan.Role.LEADER) return true;               // chef gere tout le monde
-        if (vr == Clan.Role.OFFICER) return tr == Clan.Role.MEMBER; // bras droit gere les membres
+        if (vr == Clan.Role.LEADER) return true;
+        if (vr == Clan.Role.OFFICER) return tr == Clan.Role.MEMBER;
         return false;
     }
 
-    // ==================================================================
-    //  Helpers d'items
-    // ==================================================================
     private static void fill(Inventory inv) {
         ItemStack filler = item(Material.GRAY_STAINED_GLASS_PANE, "&r", List.of());
         for (int i = 0; i < inv.getSize(); i++) {
