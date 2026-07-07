@@ -20,14 +20,14 @@ import java.util.List;
 
 /**
  * /armefolle : marque l'objet tenu en main.
- * Un objet marque recoit un lore et n'est PAS drop a la mort (garde en inventaire).
- * A mettre dans : ArmeFolle/java/fr/armefolle/ArmeFolle.java
+ * Un objet marqué reçoit un lore et n'est PAS drop à la mort (gardé en inventaire).
+ * Seuls les OP peuvent utiliser la commande.
  */
 public class ArmeFolle extends LoadedPlugin implements Listener {
 
     private NamespacedKey key;
 
-    private static final Component LORE_LINE = Component.text("\uD83D\uDC80 Ne se perd pas a la mort")
+    private static final Component LORE_LINE = Component.text("💀 Ne se perd pas à la mort")
             .color(NamedTextColor.RED)
             .decoration(TextDecoration.ITALIC, false);
 
@@ -38,7 +38,14 @@ public class ArmeFolle extends LoadedPlugin implements Listener {
 
         registerCommand("armefolle", (sender, cmd, label, args) -> {
             if (!(sender instanceof Player player)) {
-                sender.sendMessage(Component.text("Commande reservee aux joueurs.")
+                sender.sendMessage(Component.text("Commande réservée aux joueurs.")
+                        .color(NamedTextColor.RED));
+                return true;
+            }
+
+            // Vérifie que le joueur est OP
+            if (!player.isOp()) {
+                player.sendMessage(Component.text("Vous devez être OP pour utiliser cette commande.")
                         .color(NamedTextColor.RED));
                 return true;
             }
@@ -52,32 +59,38 @@ public class ArmeFolle extends LoadedPlugin implements Listener {
 
             ItemMeta meta = item.getItemMeta();
 
-            // Marque l'objet de facon fiable (invisible)
+            // Marque l'objet de façon invisible
             meta.getPersistentDataContainer().set(key, PersistentDataType.BYTE, (byte) 1);
 
-            // Ajoute le lore visible
-            List<Component> lore = (meta.lore() == null) ? new ArrayList<>() : new ArrayList<>(meta.lore());
+            // Ajoute le lore s'il n'est pas déjà présent
+            List<Component> lore = meta.lore() == null
+                    ? new ArrayList<>()
+                    : new ArrayList<>(meta.lore());
+
             if (!lore.contains(LORE_LINE)) {
                 lore.add(LORE_LINE);
             }
-            meta.lore(lore);
 
+            meta.lore(lore);
             item.setItemMeta(meta);
 
-            player.sendMessage(Component.text("\uD83D\uDC80 Cet objet ne se perdra plus a la mort !")
+            player.sendMessage(Component.text("💀 Cet objet ne se perdra plus à la mort !")
                     .color(NamedTextColor.GREEN));
+
             return true;
         });
     }
 
     @EventHandler
-    public void onDeath(PlayerDeathEvent e) {
-        Iterator<ItemStack> it = e.getDrops().iterator();
-        while (it.hasNext()) {
-            ItemStack item = it.next();
+    public void onDeath(PlayerDeathEvent event) {
+        Iterator<ItemStack> iterator = event.getDrops().iterator();
+
+        while (iterator.hasNext()) {
+            ItemStack item = iterator.next();
+
             if (isArmeFolle(item)) {
-                e.getItemsToKeep().add(item); // garde l'objet apres le respawn
-                it.remove();                  // et ne le drop pas
+                event.getItemsToKeep().add(item); // Garde l'objet
+                iterator.remove();                // Empêche le drop
             }
         }
     }
@@ -86,12 +99,13 @@ public class ArmeFolle extends LoadedPlugin implements Listener {
         if (item == null || item.getType().isAir() || !item.hasItemMeta()) {
             return false;
         }
+
         PersistentDataContainer pdc = item.getItemMeta().getPersistentDataContainer();
         return pdc.has(key, PersistentDataType.BYTE);
     }
 
     @Override
     public void onDisable() {
-        getLogger().info("ArmeFolle desactive.");
+        getLogger().info("ArmeFolle désactivé.");
     }
 }
