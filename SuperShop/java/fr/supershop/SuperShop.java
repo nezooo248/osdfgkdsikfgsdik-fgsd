@@ -857,23 +857,33 @@ public class SuperShop extends LoadedPlugin implements Listener {
 
     @Override
     public void onDisable() {
-        CommandMap map = getCommandMap();
-        Map<String, Command> known = (map != null) ? knownCommands(map) : null;
-        if (known != null) {
-            for (String label : myCommands) {
-                Command c = known.remove(label);
-                if (c != null) { try { c.unregister(map); } catch (Throwable ignored) {} }
-                known.remove("supershop:" + label);
+        try {
+            // ferme tout menu du shop encore ouvert pour ne pas laisser de fantome
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                try {
+                    if (p.getOpenInventory().getTopInventory().getHolder() instanceof ShopHolder)
+                        p.closeInventory();
+                } catch (Throwable ignored) {}
             }
-        }
-        myCommands.clear();
-        syncCommands();
 
-        for (Player p : Bukkit.getOnlinePlayers()) {
-            if (p.getOpenInventory().getTopInventory().getHolder() instanceof ShopHolder h && "SELL".equals(h.type))
-                p.closeInventory();
+            // desinscrit les evenements de CETTE instance (evite les listeners empiles au reload)
+            try { org.bukkit.event.HandlerList.unregisterAll(this); } catch (Throwable ignored) {}
+
+            CommandMap map = getCommandMap();
+            Map<String, Command> known = (map != null) ? knownCommands(map) : null;
+            if (known != null) {
+                for (String label : myCommands) {
+                    Command c = known.remove(label);
+                    if (c != null) { try { c.unregister(map); } catch (Throwable ignored) {} }
+                    known.remove("supershop:" + label);
+                }
+            }
+            myCommands.clear();
+            syncCommands();
+        } catch (Throwable t) {
+            getLogger().warning("[SuperShop] erreur pendant onDisable : " + t);
         }
-        getLogger().info("SuperShop desactive.");
+        getLogger().info("[SuperShop] >>> BUILD-5 <<< desactive proprement.");
     }
 
     // ======================= CLASSES INTERNES =======================
