@@ -335,6 +335,13 @@ public class SuperShop extends LoadedPlugin implements Listener {
         }
         allBlocks.sort(Comparator.comparing(Enum::name));
         categories.put("tousblocs", allBlocks);
+
+        // --- Diagnostic console : prouve que cette version est bien chargee ---
+        long cb = allBlocks.stream().filter(x -> x.name().contains("COMMAND_BLOCK")).count();
+        long spawn = allBlocks.stream().filter(x -> x.name().contains("SPAWNER")).count();
+        getLogger().info("[SuperShop] TOUS les blocs = " + allBlocks.size()
+                + " | command_block dedans = " + cb + " (doit etre 0)"
+                + " | spawner dedans = " + spawn + " (doit etre 0)");
     }
 
     /** Bloc non recuperable en survie (creatif uniquement, technique, etc.). Filtre par motif. */
