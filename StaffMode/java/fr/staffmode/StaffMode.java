@@ -117,7 +117,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
     public void onEnable() {
         this.file = new File(getHost().getDataFolder(), "staffmode.yml");
         this.backupFile = new File(getHost().getDataFolder(), "inv-backups.yml");
-        this.configFile = new File(getHost().getDataFolder(), "config.yml");
+        this.configFile = new File(getHost().getDataFolder(), "configstaff.yml");
         loadConfig();
         this.luckPermsPresent = hasLuckPerms();
         loadPending();
@@ -166,20 +166,44 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     // ===================== CONFIG ROLE =====================
 
+    private static final String DEFAULT_CONFIG =
+            "# ============================================\n" +
+            "#            StaffMode - Optaland\n" +
+            "# ============================================\n" +
+            "# Fichier cree automatiquement au demarrage.\n" +
+            "\n" +
+            "role:\n" +
+            "  # true  = le plugin gere le role (LuckPerms) automatiquement.\n" +
+            "  # false = le plugin ne touche jamais aux roles.\n" +
+            "  enabled: true\n" +
+            "\n" +
+            "  # Role donne au staff quand il N'EST PAS en mode staff.\n" +
+            "  # Quand il repasse en mode staff, il retrouve le role qu'il avait avant.\n" +
+            "  default: \"default\"\n";
+
     private void loadConfig() {
         roleEnabled = true;
         defaultRole = "default";
         try {
             File dir = configFile.getParentFile();
             if (dir != null && !dir.exists()) dir.mkdirs();
-            YamlConfiguration cfg = configFile.exists()
-                    ? YamlConfiguration.loadConfiguration(configFile) : new YamlConfiguration();
-            boolean created = false;
-            if (!cfg.contains("role.enabled")) { cfg.set("role.enabled", true); created = true; }
-            if (!cfg.contains("role.default")) { cfg.set("role.default", "default"); created = true; }
+
+            // Cree le fichier tout seul (avec commentaires) s'il n'existe pas encore.
+            if (!configFile.exists()) {
+                try (java.io.FileWriter w = new java.io.FileWriter(configFile)) {
+                    w.write(DEFAULT_CONFIG);
+                }
+                getLogger().info("[StaffMode] configstaff.yml cree.");
+            }
+
+            YamlConfiguration cfg = YamlConfiguration.loadConfiguration(configFile);
+            // Auto-completion si une cle manque (ancien fichier), sans ecraser les commentaires existants.
+            boolean changed = false;
+            if (!cfg.contains("role.enabled")) { cfg.set("role.enabled", true); changed = true; }
+            if (!cfg.contains("role.default")) { cfg.set("role.default", "default"); changed = true; }
             roleEnabled = cfg.getBoolean("role.enabled", true);
             defaultRole = cfg.getString("role.default", "default");
-            if (created) cfg.save(configFile);
+            if (changed) cfg.save(configFile);
         } catch (Throwable t) {
             getLogger().warning("[StaffMode] config role KO : " + t.getMessage());
         }
