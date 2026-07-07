@@ -186,12 +186,10 @@ public class BottleXP extends LoadedPlugin implements Listener {
         ItemStack is = new ItemStack(Material.EXPERIENCE_BOTTLE);
         ItemMeta meta = is.getItemMeta();
         if (meta != null) {
-            meta.displayName(Component.text("Bouteille d'XP", NamedTextColor.GREEN, TextDecoration.BOLD)
+            meta.displayName(Component.text("Bottle XP (Niveau " + level + ")", NamedTextColor.GREEN, TextDecoration.BOLD)
                     .decoration(TextDecoration.ITALIC, false));
 
             List<Component> lore = new ArrayList<>();
-            lore.add(line("Niveau : ", NamedTextColor.GRAY)
-                    .append(Component.text(String.valueOf(level), NamedTextColor.YELLOW)));
             lore.add(line("XP : ", NamedTextColor.GRAY)
                     .append(Component.text(points + " points", NamedTextColor.YELLOW)));
             lore.add(line("Proprietaire : ", NamedTextColor.GRAY)
