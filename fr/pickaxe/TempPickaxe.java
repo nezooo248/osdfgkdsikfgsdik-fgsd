@@ -3,6 +3,7 @@ package fr.pickaxe;
 import fr.loader.api.LoadedPlugin;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -29,6 +30,8 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * TempPickaxe - a mettre dans : fr/pickaxe/TempPickaxe.java
@@ -42,8 +45,8 @@ import java.util.List;
 public class TempPickaxe extends LoadedPlugin implements Listener {
 
     private static final String PERM = "pickaxe.give.staff";
-    // Duree de vie de la pioche : 24h.
-    private static final long DURATION_MS = 24L * 60L * 60L * 1000L;
+    // Format de duree accepte : 24h, 1d, 10d, 30m, 45s, ou combine (1d12h30m).
+    private static final Pattern DURATION = Pattern.compile("(\\d+)([dhms])");
 
     private static final NamespacedKey KEY_PICK   = new NamespacedKey("temppickaxe", "temp");
     private static final NamespacedKey KEY_EXPIRE = new NamespacedKey("temppickaxe", "expire");
@@ -64,8 +67,13 @@ public class TempPickaxe extends LoadedPlugin implements Listener {
                 sender.sendMessage(msg("Tu n'as pas la permission " + PERM + ".", NamedTextColor.RED));
                 return true;
             }
-            if (args.length == 0 || !args[0].equalsIgnoreCase("TEMP")) {
-                sender.sendMessage(msg("Usage : /givepickaxe TEMP [joueur]", NamedTextColor.GRAY));
+            if (args.length == 0) {
+                sender.sendMessage(msg("Usage : /givepickaxe <duree> [joueur]  (ex: 24h, 1d, 10d, 1d12h)", NamedTextColor.GRAY));
+                return true;
+            }
+            long durationMs = parseDuration(args[0]);
+            if (durationMs <= 0) {
+                sender.sendMessage(msg("Duree invalide : " + args[0] + "  (ex: 24h, 1d, 10d, 1d12h)", NamedTextColor.RED));
                 return true;
             }
             Player target;
@@ -78,15 +86,15 @@ public class TempPickaxe extends LoadedPlugin implements Listener {
             } else if (sender instanceof Player p) {
                 target = p;
             } else {
-                sender.sendMessage(msg("Depuis la console, precise un joueur : /givepickaxe TEMP <joueur>", NamedTextColor.RED));
+                sender.sendMessage(msg("Depuis la console, precise un joueur : /givepickaxe <duree> <joueur>", NamedTextColor.RED));
                 return true;
             }
 
-            long expire = System.currentTimeMillis() + DURATION_MS;
-            giveItem(target, createPickaxe(expire));
-            target.sendMessage(msg("Tu as recu une pioche temporaire. Elle expire le " + FMT.format(new Date(expire)) + ".", NamedTextColor.LIGHT_PURPLE));
+            long expire = System.currentTimeMillis() + durationMs;
+            giveItem(target, createPickaxe(expire, durationMs));
+            target.sendMessage(msg("Tu as recu une Optaland Pickaxe (" + formatDuration(durationMs) + "). Elle expire le " + FMT.format(new Date(expire)) + ".", NamedTextColor.LIGHT_PURPLE));
             if (!sender.equals(target)) {
-                sender.sendMessage(msg("Pioche temporaire donnee a " + target.getName() + ".", NamedTextColor.GREEN));
+                sender.sendMessage(msg("Pioche donnee a " + target.getName() + " pour " + formatDuration(durationMs) + ".", NamedTextColor.GREEN));
             }
             return true;
         });
@@ -124,16 +132,15 @@ public class TempPickaxe extends LoadedPlugin implements Listener {
 
     // ===================== CREATION =====================
 
-    private ItemStack createPickaxe(long expire) {
+    private ItemStack createPickaxe(long expire, long durationMs) {
         ItemStack is = new ItemStack(Material.NETHERITE_PICKAXE);
         ItemMeta meta = is.getItemMeta();
         if (meta != null) {
-            meta.displayName(Component.text("Optaland Pickaxe", NamedTextColor.GOLD, TextDecoration.BOLD)
-                    .decoration(TextDecoration.ITALIC, false));
+            meta.displayName(gradientName("Optaland Pickaxe"));
 
             List<Component> lore = new ArrayList<>();
             lore.add(line("Casse en 3x3", NamedTextColor.AQUA));
-            lore.add(line("Duree : 24h", NamedTextColor.GRAY));
+            lore.add(line("Duree : " + formatDuration(durationMs), NamedTextColor.GRAY));
             lore.add(line("Expire le " + FMT.format(new Date(expire)), NamedTextColor.RED));
             lore.add(Component.empty());
             lore.add(line("TEMP", NamedTextColor.DARK_GRAY));
@@ -262,6 +269,61 @@ public class TempPickaxe extends LoadedPlugin implements Listener {
         for (ItemStack leftover : p.getInventory().addItem(item).values()) {
             p.getWorld().dropItemNaturally(p.getLocation(), leftover);
         }
+    }
+
+    /** Parse une duree du type 24h, 1d, 10d, 30m, 45s ou combinee (1d12h30m). Renvoie des ms, ou -1 si invalide. */
+    private long parseDuration(String s) {
+        if (s == null || s.isEmpty()) return -1;
+        s = s.toLowerCase();
+        Matcher m = DURATION.matcher(s);
+        long total = 0;
+        int matchedEnd = 0;
+        boolean found = false;
+        while (m.find()) {
+            found = true;
+            long n;
+            try { n = Long.parseLong(m.group(1)); } catch (NumberFormatException e) { return -1; }
+            switch (m.group(2)) {
+                case "d" -> total += n * 86_400_000L;
+                case "h" -> total += n * 3_600_000L;
+                case "m" -> total += n * 60_000L;
+                case "s" -> total += n * 1_000L;
+                default -> { return -1; }
+            }
+            matchedEnd = m.end();
+        }
+        // Refuse s'il reste des caracteres non reconnus (ex: "1d5x").
+        if (!found || matchedEnd != s.length()) return -1;
+        return total;
+    }
+
+    /** Affiche une duree lisible : 10j, 24h, 1j 12h, 30m... */
+    private String formatDuration(long ms) {
+        long s = ms / 1000;
+        long d = s / 86400; s %= 86400;
+        long h = s / 3600;  s %= 3600;
+        long mi = s / 60;   s %= 60;
+        StringBuilder sb = new StringBuilder();
+        if (d > 0) sb.append(d).append("j ");
+        if (h > 0) sb.append(h).append("h ");
+        if (mi > 0) sb.append(mi).append("m ");
+        if (s > 0 && d == 0 && h == 0) sb.append(s).append("s ");
+        String out = sb.toString().trim();
+        return out.isEmpty() ? "0s" : out;
+    }
+
+    /** Nom en degrade violet (clair -> fonce), en gras. */
+    private Component gradientName(String text) {
+        TextColor from = TextColor.color(0xC77DFF); // violet clair
+        TextColor to   = TextColor.color(0x7B2CBF); // violet fonce
+        Component c = Component.empty();
+        int len = text.length();
+        for (int i = 0; i < len; i++) {
+            float t = len <= 1 ? 0f : (float) i / (len - 1);
+            TextColor col = TextColor.lerp(t, from, to);
+            c = c.append(Component.text(String.valueOf(text.charAt(i)), col));
+        }
+        return c.decorate(TextDecoration.BOLD).decoration(TextDecoration.ITALIC, false);
     }
 
     static final Component PREFIX = Component.text("Pioche ", NamedTextColor.GOLD, TextDecoration.BOLD)
