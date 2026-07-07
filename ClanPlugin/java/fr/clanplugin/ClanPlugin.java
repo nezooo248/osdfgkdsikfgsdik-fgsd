@@ -12,9 +12,11 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Projectile;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
@@ -23,6 +25,7 @@ import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
+import org.bukkit.projectiles.ProjectileSource;
 
 import java.io.File;
 import java.io.IOException;
@@ -47,6 +50,7 @@ import java.util.UUID;
  * /clan create <nom>    cree un clan (max 5 membres)
  * /clan invite <joueur> invite un joueur
  * /clan accept [nom] / deny [nom] / leave
+ * /clan pvp             active/desactive le PvP entre membres (chef)
  * /clan dissoudre <nom> (staff clan.staff)
  * /clan info <joueur|clan> (staff clan.staff)
  */
@@ -190,6 +194,32 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
 
     boolean validName(String n) { return n != null && n.matches("[A-Za-z0-9_]{3,16}"); }
 
+    // ===================== PVP ENTRE MEMBRES =====================
+
+    @EventHandler
+    public void onClanDamage(EntityDamageByEntityEvent e) {
+        if (e.isCancelled()) return;
+        if (!(e.getEntity() instanceof Player victim)) return;
+
+        Player attacker = null;
+        if (e.getDamager() instanceof Player p) {
+            attacker = p;
+        } else if (e.getDamager() instanceof Projectile proj) {
+            ProjectileSource src = proj.getShooter();
+            if (src instanceof Player p) attacker = p;
+        }
+        if (attacker == null || attacker.equals(victim)) return;
+
+        Clan clan = getClanOf(attacker.getUniqueId());
+        if (clan == null) return;
+        // Meme clan et PvP interne desactive -> on annule les degats.
+        if (clan.isMember(victim.getUniqueId()) && !clan.isPvp()) {
+            e.setCancelled(true);
+            attacker.sendMessage(PREFIX.append(Component.text(
+                    "PvP desactive entre membres du clan. (/clan pvp pour activer)", NamedTextColor.RED)));
+        }
+    }
+
     // ===================== COMMANDE =====================
 
     private boolean handleCommand(CommandSender sender, String[] args) {
@@ -206,6 +236,7 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
             case "accept": case "accepter": return cmdAccept(sender, args);
             case "deny": case "refuser": return cmdDeny(sender, args);
             case "leave": case "quitter": return cmdLeave(sender);
+            case "pvp": return cmdPvp(sender);
             case "dissoudre": case "disband": return cmdDisband(sender, args);
             case "info": return cmdInfo(sender, args);
             default: cmdHelp(sender); return true;
@@ -300,6 +331,21 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
         return true;
     }
 
+    private boolean cmdPvp(CommandSender s) {
+        if (!(s instanceof Player p)) { send(s, "Joueurs uniquement.", NamedTextColor.RED); return true; }
+        Clan clan = getClanOf(p.getUniqueId());
+        if (clan == null) { send(p, "Tu n'es dans aucun clan.", NamedTextColor.RED); return true; }
+        if (!clan.isLeader(p.getUniqueId())) { send(p, "Seul le chef peut changer le PvP du clan.", NamedTextColor.RED); return true; }
+        clan.setPvp(!clan.isPvp());
+        save();
+        if (clan.isPvp()) {
+            broadcast(clan, "Le PvP entre membres est maintenant ACTIVE.", NamedTextColor.RED);
+        } else {
+            broadcast(clan, "Le PvP entre membres est maintenant DESACTIVE.", NamedTextColor.GREEN);
+        }
+        return true;
+    }
+
     private boolean cmdDisband(CommandSender s, String[] a) {
         boolean staff = s.hasPermission("clan.staff");
         Clan target;
@@ -342,6 +388,7 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
     private void clanInfo(CommandSender s, Clan clan) {
         s.sendMessage(Component.text("Clan: " + clan.getName() + " (" + clan.size() + "/" + MAX_MEMBERS + ")", NamedTextColor.GOLD));
         s.sendMessage(Component.text("Chef: " + pname(clan.getLeader()), NamedTextColor.GRAY));
+        s.sendMessage(Component.text("PvP interne: " + (clan.isPvp() ? "active" : "desactive"), NamedTextColor.GRAY));
         List<String> off = new ArrayList<>();
         for (UUID u : clan.getOfficers()) off.add(pname(u));
         s.sendMessage(Component.text("Bras droits: " + (off.isEmpty() ? "aucun" : String.join(", ", off)), NamedTextColor.GRAY));
@@ -356,6 +403,7 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
         s.sendMessage(Component.text("/clan create <nom>", NamedTextColor.YELLOW));
         s.sendMessage(Component.text("/clan invite <joueur> (max " + MAX_MEMBERS + ")", NamedTextColor.YELLOW));
         s.sendMessage(Component.text("/clan accept [nom]  |  /clan deny [nom]", NamedTextColor.YELLOW));
+        s.sendMessage(Component.text("/clan pvp - active/desactive le PvP entre membres (chef)", NamedTextColor.YELLOW));
         s.sendMessage(Component.text("/clan leave", NamedTextColor.YELLOW));
         if (s.hasPermission("clan.staff")) {
             s.sendMessage(Component.text("/clan dissoudre <nom> (staff)", NamedTextColor.RED));
@@ -365,7 +413,7 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
 
     private List<String> handleTab(CommandSender s, String[] a) {
         if (a.length == 1) {
-            List<String> subs = new ArrayList<>(List.of("create", "invite", "accept", "deny", "leave", "help"));
+            List<String> subs = new ArrayList<>(List.of("create", "invite", "accept", "deny", "leave", "pvp", "help"));
             if (s.hasPermission("clan.staff")) { subs.add("dissoudre"); subs.add("info"); }
             else if (s instanceof Player p) {
                 Clan cl = getClanOf(p.getUniqueId());
@@ -407,6 +455,7 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
     private static final int INFO_SLOT = 4;
     private static final int[] MEMBER_SLOTS = {19, 20, 21, 22, 23};
     private static final int HEAD_SLOT = 4, KICK_SLOT = 11, ROLE_SLOT = 15, BACK_SLOT = 22;
+    private static final int PVP_SLOT = 8;
 
     private void openMain(Player viewer, Clan clan) {
         ClanMenuHolder holder = new ClanMenuHolder(clan.getName());
@@ -419,6 +468,17 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
         info.add(line("Membres: " + clan.size() + "/" + MAX_MEMBERS, NamedTextColor.GRAY));
         info.add(line("Bras droits: " + clan.getOfficers().size(), NamedTextColor.GRAY));
         inv.setItem(INFO_SLOT, item(Material.OAK_SIGN, "Clan " + clan.getName(), NamedTextColor.GOLD, info));
+
+        // Bouton PvP (visible par tous, cliquable seulement par le chef)
+        boolean pvpOn = clan.isPvp();
+        List<Component> pvpLore = new ArrayList<>();
+        pvpLore.add(line("Etat: " + (pvpOn ? "ACTIVE" : "DESACTIVE"), pvpOn ? NamedTextColor.RED : NamedTextColor.GREEN));
+        if (clan.isLeader(viewer.getUniqueId())) {
+            pvpLore.add(Component.empty());
+            pvpLore.add(line("Clic pour " + (pvpOn ? "desactiver" : "activer"), NamedTextColor.YELLOW));
+        }
+        inv.setItem(PVP_SLOT, item(pvpOn ? Material.DIAMOND_SWORD : Material.SHIELD,
+                "PvP entre membres", pvpOn ? NamedTextColor.RED : NamedTextColor.GREEN, pvpLore));
 
         boolean canManage = clan.isLeader(viewer.getUniqueId()) || clan.isOfficer(viewer.getUniqueId());
         List<UUID> ordered = new ArrayList<>();
@@ -503,6 +563,18 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
         if (h instanceof ClanMenuHolder holder) {
             Clan clan = getClan(holder.clanName);
             if (clan == null) { p.closeInventory(); return; }
+
+            // Clic sur le bouton PvP
+            if (e.getSlot() == PVP_SLOT) {
+                if (!clan.isLeader(p.getUniqueId())) { send(p, "Seul le chef peut changer le PvP.", NamedTextColor.RED); return; }
+                clan.setPvp(!clan.isPvp());
+                save();
+                if (clan.isPvp()) broadcast(clan, "Le PvP entre membres est maintenant ACTIVE.", NamedTextColor.RED);
+                else broadcast(clan, "Le PvP entre membres est maintenant DESACTIVE.", NamedTextColor.GREEN);
+                openMain(p, clan);
+                return;
+            }
+
             UUID target = holder.slotToMember.get(e.getSlot());
             if (target == null || !canManage(clan, p.getUniqueId(), target)) return;
             openMember(p, clan, target);
@@ -620,6 +692,7 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
                     Clan clan = new Clan(name, UUID.fromString(ls));
                     for (String mm : cfg.getStringList(path + ".members")) clan.addMember(UUID.fromString(mm));
                     for (String oo : cfg.getStringList(path + ".officers")) clan.getOfficers().add(UUID.fromString(oo));
+                    clan.setPvp(cfg.getBoolean(path + ".pvp", false));
                     clans.put(name.toLowerCase(Locale.ROOT), clan);
                     for (UUID u : clan.getMembers()) playerClan.put(u, name.toLowerCase(Locale.ROOT));
                 } catch (IllegalArgumentException ex) {
@@ -645,6 +718,7 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
             List<String> off = new ArrayList<>();
             for (UUID u : clan.getOfficers()) off.add(u.toString());
             cfg.set(path + ".officers", off);
+            cfg.set(path + ".pvp", clan.isPvp());
         }
         for (Map.Entry<UUID, String> e : names.entrySet()) cfg.set("names." + e.getKey(), e.getValue());
         try {
@@ -664,6 +738,7 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
         private final UUID leader;
         private final Set<UUID> members = new LinkedHashSet<>();
         private final Set<UUID> officers = new LinkedHashSet<>();
+        private boolean pvp = false; // PvP entre membres desactive par defaut
         Clan(String name, UUID leader) { this.name = name; this.leader = leader; this.members.add(leader); }
         String getName() { return name; }
         UUID getLeader() { return leader; }
@@ -673,6 +748,8 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
         boolean isMember(UUID u) { return members.contains(u); }
         boolean isLeader(UUID u) { return leader.equals(u); }
         boolean isOfficer(UUID u) { return officers.contains(u); }
+        boolean isPvp() { return pvp; }
+        void setPvp(boolean pvp) { this.pvp = pvp; }
         Role getRole(UUID u) {
             if (leader.equals(u)) return Role.LEADER;
             if (officers.contains(u)) return Role.OFFICER;
