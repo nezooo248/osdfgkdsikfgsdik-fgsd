@@ -120,9 +120,27 @@ public class CombatTag extends LoadedPlugin implements Listener {
     public void onQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
         if (remainingSeconds(player.getUniqueId()) > 0) {
-            player.setHealth(0.0); // mort : les objets sont drop, punition du combat-log
+            dropAndClear(player); // perte garantie du stuff (meme si keepInventory est actif)
+            player.setHealth(0.0); // enregistre la mort
         }
         tagged.remove(player.getUniqueId());
+    }
+
+    /** Lache tout l'inventaire du joueur au sol puis le vide : le joueur perd son stuff. */
+    private void dropAndClear(Player player) {
+        var world = player.getWorld();
+        var loc = player.getLocation();
+
+        for (var item : player.getInventory().getContents()) {
+            if (item != null && !item.getType().isAir()) world.dropItemNaturally(loc, item);
+        }
+        for (var item : player.getInventory().getArmorContents()) {
+            if (item != null && !item.getType().isAir()) world.dropItemNaturally(loc, item);
+        }
+        for (var item : player.getInventory().getExtraContents()) {
+            if (item != null && !item.getType().isAir()) world.dropItemNaturally(loc, item);
+        }
+        player.getInventory().clear();
     }
 
     @EventHandler
