@@ -5,9 +5,6 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 
-/**
- * Met a jour le pseudo connu du joueur a la connexion (pour /clan info hors ligne).
- */
 public class PlayerListener implements Listener {
 
     private final ClanPlugin plugin;
