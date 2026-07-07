@@ -1,49 +1,48 @@
 package fr.auctionhouse;
 
+import com.destroystokyo.paper.event.server.AsyncTabCompleteEvent;
 import fr.loader.api.LoadedPlugin;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import net.milkbowl.vault.economy.Economy;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
-import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.permissions.PermissionAttachmentInfo;
+import org.bukkit.plugin.RegisteredServiceProvider;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 /**
- * Hôtel des ventes.
- *   /ah                -> ouvre le menu de toutes les annonces
- *   /ah sell <prix>    -> met l'objet en main en vente (prix en émeraudes)
- *   /ah list           -> liste tes annonces
- *   /ah cancel <n>     -> retire ton annonce n° n (objet rendu)
- *   /ah collect        -> récupère les émeraudes de tes ventes hors-ligne
- *   /ah <recherche>    -> cherche une correspondance et ouvre le menu filtré
+ * Hôtel des ventes (économie Vault / EssentialsX).
+ *   /ah                -> menu de toutes les annonces
+ *   /ah sell <prix>    -> met l'objet en main en vente (ex: 100k, 1.5m, 100000)
+ *   /ah list           -> tes annonces
+ *   /ah cancel <n>     -> retire ton annonce n° n
+ *   /ah <recherche>    -> menu filtré par correspondance
  *
- * Permissions : ah.use (utiliser) ; ah.sell.<nombre> = limite d'annonces (défaut 5, ah.sell.* = illimité).
+ * Permissions : ah.use ; ah.sell.<nombre> = limite d'annonces (défaut 5, ah.sell.* = illimité).
  */
 public class AuctionHouse extends LoadedPlugin implements Listener {
 
     private static final int DEFAULT_LIMIT = 5;
-    private static final int PAGE_SIZE = 45;               // slots 0..44, dernière rangée = navigation
-    private static final Material CURRENCY = Material.EMERALD;
+    private static final int PAGE_SIZE = 45; // slots 0..44, dernière rangée = navigation
 
     private final List<Listing> listings = new ArrayList<>();
-    private final Map<UUID, Integer> pending = new HashMap<>(); // gains à récupérer (vendeurs hors-ligne)
+    private Economy economy;
 
     @Override
     public void onEnable() {
@@ -62,20 +61,37 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
                 return true;
             }
             switch (args[0].toLowerCase()) {
-                case "sell"    -> handleSell(player, args);
-                case "list"    -> handleList(player);
-                case "cancel"  -> handleCancel(player, args);
-                case "collect" -> handleCollect(player);
-                default        -> openMenu(player, String.join(" ", args).toLowerCase(), 0); // recherche
+                case "sell"   -> handleSell(player, args);
+                case "list"   -> handleList(player);
+                case "cancel" -> handleCancel(player, args);
+                default       -> openMenu(player, String.join(" ", args).toLowerCase(), 0);
             }
             return true;
         });
         getLogger().info("AuctionHouse activé.");
     }
 
+    // ---------- Économie ----------
+
+    private Economy getEconomy() {
+        if (economy != null) return economy;
+        RegisteredServiceProvider<Economy> rsp = Bukkit.getServicesManager().getRegistration(Economy.class);
+        if (rsp != null) economy = rsp.getProvider();
+        return economy;
+    }
+
+    private String money(double amount) {
+        Economy eco = getEconomy();
+        return eco != null ? eco.format(amount) : String.valueOf((long) amount);
+    }
+
     // ---------- Sous-commandes ----------
 
     private void handleSell(Player player, String[] args) {
+        if (getEconomy() == null) {
+            player.sendMessage(msg("Économie indisponible (Vault/EssentialsX manquant).", NamedTextColor.RED));
+            return;
+        }
         int limit = getSellLimit(player);
         long current = listings.stream().filter(l -> l.seller.equals(player.getUniqueId())).count();
         if (current >= limit) {
@@ -88,24 +104,24 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
             return;
         }
         if (args.length < 2) {
-            player.sendMessage(msg("Usage : /ah sell <prix>", NamedTextColor.RED));
+            player.sendMessage(msg("Usage : /ah sell <prix>  (ex: 100k, 1.5m, 100000)", NamedTextColor.RED));
             return;
         }
-        int price;
+        double price;
         try {
-            price = Integer.parseInt(args[1]);
+            price = parsePrice(args[1]);
         } catch (NumberFormatException e) {
-            player.sendMessage(msg("Le prix doit être un nombre.", NamedTextColor.RED));
+            player.sendMessage(msg("Prix invalide. Exemples : 100, 100000, 100k, 1.5m", NamedTextColor.RED));
             return;
         }
-        if (price < 1) {
-            player.sendMessage(msg("Le prix doit être d'au moins 1 émeraude.", NamedTextColor.RED));
+        if (price <= 0) {
+            player.sendMessage(msg("Le prix doit être supérieur à 0.", NamedTextColor.RED));
             return;
         }
         ItemStack sold = inHand.clone();
-        player.getInventory().setItemInMainHand(null); // on retire l'objet du joueur
+        player.getInventory().setItemInMainHand(null);
         listings.add(new Listing(player.getUniqueId(), player.getName(), sold, price));
-        player.sendMessage(msg("Objet mis en vente pour " + price + " émeraude(s).", NamedTextColor.GREEN));
+        player.sendMessage(msg("Objet mis en vente pour " + money(price) + ".", NamedTextColor.GREEN));
     }
 
     private void handleList(Player player) {
@@ -120,7 +136,7 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
             player.sendMessage(Component.text("  #" + (i + 1) + " ", NamedTextColor.GRAY)
                     .append(itemName(l.item).color(NamedTextColor.WHITE))
                     .append(Component.text(" x" + l.item.getAmount(), NamedTextColor.DARK_GRAY))
-                    .append(Component.text("  —  " + l.price + " ém.", NamedTextColor.GREEN)));
+                    .append(Component.text("  —  " + money(l.price), NamedTextColor.GREEN)));
         }
         player.sendMessage(msg("Utilise /ah cancel <n> pour retirer une annonce.", NamedTextColor.DARK_GRAY));
     }
@@ -148,22 +164,9 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         player.sendMessage(msg("Annonce retirée, objet récupéré.", NamedTextColor.GREEN));
     }
 
-    private void handleCollect(Player player) {
-        int amount = pending.getOrDefault(player.getUniqueId(), 0);
-        if (amount <= 0) {
-            player.sendMessage(msg("Tu n'as rien à récupérer.", NamedTextColor.YELLOW));
-            return;
-        }
-        pending.remove(player.getUniqueId());
-        giveEmeralds(player, amount);
-        player.sendMessage(msg("Tu as récupéré " + amount + " émeraude(s).", NamedTextColor.GREEN));
-    }
-
     // ---------- Menu (GUI) ----------
 
     private void openMenu(Player player, String query, int page) {
-        collectPending(player); // on livre les gains en attente à l'ouverture
-
         List<Listing> view = new ArrayList<>();
         for (Listing l : listings) {
             if (query == null || matches(l.item, query)) view.add(l);
@@ -181,8 +184,9 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         for (int i = 0; i < PAGE_SIZE && start + i < view.size(); i++) {
             inv.setItem(i, displayItem(view.get(start + i), player));
         }
-        if (page > 0)               inv.setItem(45, navButton(Material.ARROW, "◀ Page précédente"));
-        if (page < totalPages - 1)  inv.setItem(53, navButton(Material.ARROW, "Page suivante ▶"));
+        // Flèches de navigation : bas-gauche (45) et bas-droite (53)
+        if (page > 0)              inv.setItem(45, navButton(Material.ARROW, "◀ Page précédente"));
+        if (page < totalPages - 1) inv.setItem(53, navButton(Material.ARROW, "Page suivante ▶"));
         inv.setItem(49, navButton(Material.BARRIER, "Fermer"));
 
         player.openInventory(inv);
@@ -194,7 +198,7 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         List<Component> lore = meta.lore() == null ? new ArrayList<>() : new ArrayList<>(meta.lore());
         lore.add(Component.empty());
         lore.add(line("Vendeur : " + l.sellerName, NamedTextColor.GRAY));
-        lore.add(line("Prix : " + l.price + " émeraude(s)", NamedTextColor.GREEN));
+        lore.add(line("Prix : " + money(l.price), NamedTextColor.GREEN));
         lore.add(l.seller.equals(viewer.getUniqueId())
                 ? line("Clic pour annuler et récupérer", NamedTextColor.YELLOW)
                 : line("Clic pour acheter", NamedTextColor.AQUA));
@@ -206,7 +210,7 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
     @EventHandler
     public void onClick(InventoryClickEvent event) {
         if (!(event.getInventory().getHolder() instanceof AuctionHolder holder)) return;
-        event.setCancelled(true); // aucun objet ne bouge
+        event.setCancelled(true);
         if (!(event.getWhoClicked() instanceof Player player)) return;
         if (!holder.inventory.equals(event.getClickedInventory())) return;
 
@@ -220,31 +224,37 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         if (index >= holder.view.size()) return;
         Listing l = holder.view.get(index);
 
-        if (!listings.contains(l)) { // déjà vendue/annulée entre-temps
+        if (!listings.contains(l)) {
             player.sendMessage(msg("Cette annonce n'existe plus.", NamedTextColor.RED));
             openMenu(player, holder.query, holder.page);
             return;
         }
-        if (l.seller.equals(player.getUniqueId())) { // annuler sa propre annonce
+        if (l.seller.equals(player.getUniqueId())) {
             listings.remove(l);
             giveItem(player, l.item);
             player.sendMessage(msg("Annonce annulée, objet récupéré.", NamedTextColor.GREEN));
             openMenu(player, holder.query, holder.page);
             return;
         }
-        if (countEmeralds(player) < l.price) {
-            player.sendMessage(msg("Il te faut " + l.price + " émeraude(s).", NamedTextColor.RED));
+        Economy eco = getEconomy();
+        if (eco == null) {
+            player.sendMessage(msg("Économie indisponible.", NamedTextColor.RED));
             return;
         }
-        removeEmeralds(player, l.price);
+        if (!eco.has(player, l.price)) {
+            player.sendMessage(msg("Il te faut " + money(l.price) + ".", NamedTextColor.RED));
+            return;
+        }
+        eco.withdrawPlayer(player, l.price);
+        OfflinePlayer seller = Bukkit.getOfflinePlayer(l.seller);
+        eco.depositPlayer(seller, l.price);
         listings.remove(l);
         giveItem(player, l.item);
-        payout(l.seller, l.price);
-        player.sendMessage(msg("Objet acheté pour " + l.price + " émeraude(s) !", NamedTextColor.GREEN));
+        player.sendMessage(msg("Objet acheté pour " + money(l.price) + " !", NamedTextColor.GREEN));
 
-        Player seller = Bukkit.getPlayer(l.seller);
-        if (seller != null) {
-            seller.sendMessage(msg(player.getName() + " a acheté ton objet pour " + l.price + " ém.", NamedTextColor.GREEN));
+        Player onlineSeller = Bukkit.getPlayer(l.seller);
+        if (onlineSeller != null) {
+            onlineSeller.sendMessage(msg(player.getName() + " a acheté ton objet pour " + money(l.price) + ".", NamedTextColor.GREEN));
         }
         openMenu(player, holder.query, holder.page);
     }
@@ -258,12 +268,50 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         }
     }
 
+    // ---------- Auto-complétion ----------
+
     @EventHandler
-    public void onJoin(PlayerJoinEvent event) {
-        collectPending(event.getPlayer());
+    public void onTabComplete(AsyncTabCompleteEvent event) {
+        String buffer = event.getBuffer();
+        if (buffer.startsWith("/")) buffer = buffer.substring(1);
+        if (!buffer.toLowerCase().startsWith("ah")) return;
+
+        String[] parts = buffer.split(" ", -1);
+        if (parts.length == 2) { // /ah <sub>
+            String partial = parts[1].toLowerCase();
+            List<String> matches = new ArrayList<>();
+            for (String s : List.of("sell", "list", "cancel")) {
+                if (s.startsWith(partial)) matches.add(s);
+            }
+            if (!matches.isEmpty()) event.setCompletions(matches);
+        } else if (parts.length == 3 && parts[1].equalsIgnoreCase("sell")) {
+            event.setCompletions(List.of("100", "1000", "10k", "100k", "1m"));
+        } else if (parts.length == 3 && parts[1].equalsIgnoreCase("cancel")
+                && event.getSender() instanceof Player p) {
+            try {
+                int n = myListings(p).size();
+                List<String> nums = new ArrayList<>();
+                for (int i = 1; i <= n; i++) nums.add(String.valueOf(i));
+                if (!nums.isEmpty()) event.setCompletions(nums);
+            } catch (Exception ignored) {}
+        }
     }
 
     // ---------- Utilitaires ----------
+
+    /** Parse un prix : 100, 100000, 100k, 1.5m, 2b. */
+    private double parsePrice(String s) throws NumberFormatException {
+        s = s.trim().toLowerCase().replace(",", ".");
+        if (s.isEmpty()) throw new NumberFormatException("vide");
+        double mult = 1;
+        char last = s.charAt(s.length() - 1);
+        switch (last) {
+            case 'k' -> { mult = 1_000d;         s = s.substring(0, s.length() - 1); }
+            case 'm' -> { mult = 1_000_000d;     s = s.substring(0, s.length() - 1); }
+            case 'b' -> { mult = 1_000_000_000d; s = s.substring(0, s.length() - 1); }
+        }
+        return Double.parseDouble(s) * mult;
+    }
 
     private int getSellLimit(Player player) {
         int limit = -1;
@@ -284,7 +332,7 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
 
     private List<Listing> myListings(Player player) {
         List<Listing> mine = new ArrayList<>();
-        for (Listing l : listings) {
+        for (Listing l : new ArrayList<>(listings)) {
             if (l.seller.equals(player.getUniqueId())) mine.add(l);
         }
         return mine;
@@ -298,56 +346,6 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
             return plain.contains(query);
         }
         return false;
-    }
-
-    private void payout(UUID sellerId, int amount) {
-        Player seller = Bukkit.getPlayer(sellerId);
-        if (seller != null && seller.isOnline()) {
-            giveEmeralds(seller, amount);
-        } else {
-            pending.merge(sellerId, amount, Integer::sum);
-        }
-    }
-
-    private void collectPending(Player player) {
-        int amount = pending.getOrDefault(player.getUniqueId(), 0);
-        if (amount > 0) {
-            pending.remove(player.getUniqueId());
-            giveEmeralds(player, amount);
-            player.sendMessage(msg("Tu as reçu " + amount + " émeraude(s) de tes ventes.", NamedTextColor.GREEN));
-        }
-    }
-
-    private int countEmeralds(Player p) {
-        int total = 0;
-        for (ItemStack it : p.getInventory().getContents()) {
-            if (it != null && it.getType() == CURRENCY) total += it.getAmount();
-        }
-        return total;
-    }
-
-    private void removeEmeralds(Player p, int amount) {
-        int remaining = amount;
-        ItemStack[] contents = p.getInventory().getContents();
-        for (int i = 0; i < contents.length && remaining > 0; i++) {
-            ItemStack it = contents[i];
-            if (it != null && it.getType() == CURRENCY) {
-                int take = Math.min(it.getAmount(), remaining);
-                it.setAmount(it.getAmount() - take);
-                remaining -= take;
-                if (it.getAmount() <= 0) contents[i] = null;
-            }
-        }
-        p.getInventory().setContents(contents);
-    }
-
-    private void giveEmeralds(Player p, int amount) {
-        int remaining = amount;
-        while (remaining > 0) {
-            int stack = Math.min(64, remaining);
-            giveItem(p, new ItemStack(CURRENCY, stack));
-            remaining -= stack;
-        }
     }
 
     private void giveItem(Player p, ItemStack item) {
@@ -389,8 +387,8 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         final UUID seller;
         final String sellerName;
         final ItemStack item;
-        final int price;
-        Listing(UUID seller, String sellerName, ItemStack item, int price) {
+        final double price;
+        Listing(UUID seller, String sellerName, ItemStack item, double price) {
             this.seller = seller;
             this.sellerName = sellerName;
             this.item = item;
