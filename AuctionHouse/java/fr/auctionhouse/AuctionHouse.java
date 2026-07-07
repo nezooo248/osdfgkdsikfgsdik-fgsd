@@ -6,7 +6,6 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
-import net.milkbowl.vault.economy.Economy;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
@@ -20,14 +19,15 @@ import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.permissions.PermissionAttachmentInfo;
-import org.bukkit.plugin.RegisteredServiceProvider;
+import org.bukkit.plugin.ServicesManager;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
 /**
- * Hôtel des ventes (économie Vault / EssentialsX).
+ * Hôtel des ventes (économie Vault / EssentialsX via réflexion, aucune dépendance à compiler).
  *   /ah                -> menu de toutes les annonces
  *   /ah sell <prix>    -> met l'objet en main en vente (ex: 100k, 1.5m, 100000)
  *   /ah list           -> tes annonces
@@ -42,11 +42,15 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
     private static final int PAGE_SIZE = 45; // slots 0..44, dernière rangée = navigation
 
     private final List<Listing> listings = new ArrayList<>();
-    private Economy economy;
+    private VaultEco eco; // wrapper réflexif
 
     @Override
     public void onEnable() {
         registerListener(this);
+        eco = VaultEco.hook();
+        if (eco == null) {
+            getLogger().warning("Vault/économie introuvable : les ventes seront bloquées tant qu'aucune éco n'est présente.");
+        }
         registerCommand("ah", (sender, cmd, label, args) -> {
             if (!(sender instanceof Player player)) {
                 sender.sendMessage(msg("Commande réservée aux joueurs.", NamedTextColor.RED));
@@ -71,24 +75,20 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         getLogger().info("AuctionHouse activé.");
     }
 
-    // ---------- Économie ----------
-
-    private Economy getEconomy() {
-        if (economy != null) return economy;
-        RegisteredServiceProvider<Economy> rsp = Bukkit.getServicesManager().getRegistration(Economy.class);
-        if (rsp != null) economy = rsp.getProvider();
-        return economy;
+    private VaultEco economy() {
+        if (eco == null) eco = VaultEco.hook(); // nouvelle tentative si Vault a chargé après nous
+        return eco;
     }
 
     private String money(double amount) {
-        Economy eco = getEconomy();
-        return eco != null ? eco.format(amount) : String.valueOf((long) amount);
+        VaultEco e = economy();
+        return e != null ? e.format(amount) : String.valueOf((long) amount);
     }
 
     // ---------- Sous-commandes ----------
 
     private void handleSell(Player player, String[] args) {
-        if (getEconomy() == null) {
+        if (economy() == null) {
             player.sendMessage(msg("Économie indisponible (Vault/EssentialsX manquant).", NamedTextColor.RED));
             return;
         }
@@ -185,227 +185,4 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
             inv.setItem(i, displayItem(view.get(start + i), player));
         }
         // Flèches de navigation : bas-gauche (45) et bas-droite (53)
-        if (page > 0)              inv.setItem(45, navButton(Material.ARROW, "◀ Page précédente"));
-        if (page < totalPages - 1) inv.setItem(53, navButton(Material.ARROW, "Page suivante ▶"));
-        inv.setItem(49, navButton(Material.BARRIER, "Fermer"));
-
-        player.openInventory(inv);
-    }
-
-    private ItemStack displayItem(Listing l, Player viewer) {
-        ItemStack display = l.item.clone();
-        ItemMeta meta = display.getItemMeta();
-        List<Component> lore = meta.lore() == null ? new ArrayList<>() : new ArrayList<>(meta.lore());
-        lore.add(Component.empty());
-        lore.add(line("Vendeur : " + l.sellerName, NamedTextColor.GRAY));
-        lore.add(line("Prix : " + money(l.price), NamedTextColor.GREEN));
-        lore.add(l.seller.equals(viewer.getUniqueId())
-                ? line("Clic pour annuler et récupérer", NamedTextColor.YELLOW)
-                : line("Clic pour acheter", NamedTextColor.AQUA));
-        meta.lore(lore);
-        display.setItemMeta(meta);
-        return display;
-    }
-
-    @EventHandler
-    public void onClick(InventoryClickEvent event) {
-        if (!(event.getInventory().getHolder() instanceof AuctionHolder holder)) return;
-        event.setCancelled(true);
-        if (!(event.getWhoClicked() instanceof Player player)) return;
-        if (!holder.inventory.equals(event.getClickedInventory())) return;
-
-        int slot = event.getSlot();
-        if (slot == 49) { player.closeInventory(); return; }
-        if (slot == 45) { openMenu(player, holder.query, holder.page - 1); return; }
-        if (slot == 53) { openMenu(player, holder.query, holder.page + 1); return; }
-        if (slot >= PAGE_SIZE) return;
-
-        int index = holder.page * PAGE_SIZE + slot;
-        if (index >= holder.view.size()) return;
-        Listing l = holder.view.get(index);
-
-        if (!listings.contains(l)) {
-            player.sendMessage(msg("Cette annonce n'existe plus.", NamedTextColor.RED));
-            openMenu(player, holder.query, holder.page);
-            return;
-        }
-        if (l.seller.equals(player.getUniqueId())) {
-            listings.remove(l);
-            giveItem(player, l.item);
-            player.sendMessage(msg("Annonce annulée, objet récupéré.", NamedTextColor.GREEN));
-            openMenu(player, holder.query, holder.page);
-            return;
-        }
-        Economy eco = getEconomy();
-        if (eco == null) {
-            player.sendMessage(msg("Économie indisponible.", NamedTextColor.RED));
-            return;
-        }
-        if (!eco.has(player, l.price)) {
-            player.sendMessage(msg("Il te faut " + money(l.price) + ".", NamedTextColor.RED));
-            return;
-        }
-        eco.withdrawPlayer(player, l.price);
-        OfflinePlayer seller = Bukkit.getOfflinePlayer(l.seller);
-        eco.depositPlayer(seller, l.price);
-        listings.remove(l);
-        giveItem(player, l.item);
-        player.sendMessage(msg("Objet acheté pour " + money(l.price) + " !", NamedTextColor.GREEN));
-
-        Player onlineSeller = Bukkit.getPlayer(l.seller);
-        if (onlineSeller != null) {
-            onlineSeller.sendMessage(msg(player.getName() + " a acheté ton objet pour " + money(l.price) + ".", NamedTextColor.GREEN));
-        }
-        openMenu(player, holder.query, holder.page);
-    }
-
-    @EventHandler
-    public void onDrag(InventoryDragEvent event) {
-        if (event.getInventory().getHolder() instanceof AuctionHolder) {
-            for (int raw : event.getRawSlots()) {
-                if (raw < 54) { event.setCancelled(true); return; }
-            }
-        }
-    }
-
-    // ---------- Auto-complétion ----------
-
-    @EventHandler
-    public void onTabComplete(AsyncTabCompleteEvent event) {
-        String buffer = event.getBuffer();
-        if (buffer.startsWith("/")) buffer = buffer.substring(1);
-        if (!buffer.toLowerCase().startsWith("ah")) return;
-
-        String[] parts = buffer.split(" ", -1);
-        if (parts.length == 2) { // /ah <sub>
-            String partial = parts[1].toLowerCase();
-            List<String> matches = new ArrayList<>();
-            for (String s : List.of("sell", "list", "cancel")) {
-                if (s.startsWith(partial)) matches.add(s);
-            }
-            if (!matches.isEmpty()) event.setCompletions(matches);
-        } else if (parts.length == 3 && parts[1].equalsIgnoreCase("sell")) {
-            event.setCompletions(List.of("100", "1000", "10k", "100k", "1m"));
-        } else if (parts.length == 3 && parts[1].equalsIgnoreCase("cancel")
-                && event.getSender() instanceof Player p) {
-            try {
-                int n = myListings(p).size();
-                List<String> nums = new ArrayList<>();
-                for (int i = 1; i <= n; i++) nums.add(String.valueOf(i));
-                if (!nums.isEmpty()) event.setCompletions(nums);
-            } catch (Exception ignored) {}
-        }
-    }
-
-    // ---------- Utilitaires ----------
-
-    /** Parse un prix : 100, 100000, 100k, 1.5m, 2b. */
-    private double parsePrice(String s) throws NumberFormatException {
-        s = s.trim().toLowerCase().replace(",", ".");
-        if (s.isEmpty()) throw new NumberFormatException("vide");
-        double mult = 1;
-        char last = s.charAt(s.length() - 1);
-        switch (last) {
-            case 'k' -> { mult = 1_000d;         s = s.substring(0, s.length() - 1); }
-            case 'm' -> { mult = 1_000_000d;     s = s.substring(0, s.length() - 1); }
-            case 'b' -> { mult = 1_000_000_000d; s = s.substring(0, s.length() - 1); }
-        }
-        return Double.parseDouble(s) * mult;
-    }
-
-    private int getSellLimit(Player player) {
-        int limit = -1;
-        for (PermissionAttachmentInfo info : player.getEffectivePermissions()) {
-            if (!info.getValue()) continue;
-            String perm = info.getPermission().toLowerCase();
-            if (perm.startsWith("ah.sell.")) {
-                String suffix = perm.substring("ah.sell.".length());
-                if (suffix.equals("*")) return Integer.MAX_VALUE;
-                try {
-                    int n = Integer.parseInt(suffix);
-                    if (n > limit) limit = n;
-                } catch (NumberFormatException ignored) {}
-            }
-        }
-        return limit < 0 ? DEFAULT_LIMIT : limit;
-    }
-
-    private List<Listing> myListings(Player player) {
-        List<Listing> mine = new ArrayList<>();
-        for (Listing l : new ArrayList<>(listings)) {
-            if (l.seller.equals(player.getUniqueId())) mine.add(l);
-        }
-        return mine;
-    }
-
-    private boolean matches(ItemStack item, String query) {
-        if (item.getType().name().toLowerCase().replace('_', ' ').contains(query)) return true;
-        ItemMeta meta = item.getItemMeta();
-        if (meta != null && meta.hasDisplayName()) {
-            String plain = PlainTextComponentSerializer.plainText().serialize(meta.displayName()).toLowerCase();
-            return plain.contains(query);
-        }
-        return false;
-    }
-
-    private void giveItem(Player p, ItemStack item) {
-        for (ItemStack leftover : p.getInventory().addItem(item.clone()).values()) {
-            p.getWorld().dropItemNaturally(p.getLocation(), leftover);
-        }
-    }
-
-    private Component itemName(ItemStack item) {
-        ItemMeta meta = item.getItemMeta();
-        if (meta != null && meta.hasDisplayName()) return meta.displayName();
-        return Component.translatable(item.getType().translationKey());
-    }
-
-    private ItemStack navButton(Material mat, String label) {
-        ItemStack it = new ItemStack(mat);
-        ItemMeta meta = it.getItemMeta();
-        meta.displayName(line(label, NamedTextColor.YELLOW));
-        it.setItemMeta(meta);
-        return it;
-    }
-
-    private Component msg(String text, NamedTextColor color) {
-        return Component.text(text).color(color);
-    }
-
-    private Component line(String text, NamedTextColor color) {
-        return Component.text(text).color(color).decoration(TextDecoration.ITALIC, false);
-    }
-
-    @Override
-    public void onDisable() {
-        getLogger().info("AuctionHouse désactivé.");
-    }
-
-    // ---------- Types internes ----------
-
-    private static final class Listing {
-        final UUID seller;
-        final String sellerName;
-        final ItemStack item;
-        final double price;
-        Listing(UUID seller, String sellerName, ItemStack item, double price) {
-            this.seller = seller;
-            this.sellerName = sellerName;
-            this.item = item;
-            this.price = price;
-        }
-    }
-
-    private static final class AuctionHolder implements InventoryHolder {
-        final String query;
-        final int page;
-        final List<Listing> view;
-        Inventory inventory;
-        AuctionHolder(String query, int page, List<Listing> view) {
-            this.query = query;
-            this.page = page;
-            this.view = view;
-        }
-        @Override public Inventory getInventory() { return inventory; }
-    }
-}
+        if (page >
