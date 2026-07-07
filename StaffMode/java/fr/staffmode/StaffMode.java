@@ -22,7 +22,6 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
-import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
@@ -35,6 +34,7 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.plugin.Plugin;
 
 import java.io.File;
 import java.io.IOException;
@@ -50,12 +50,28 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Staff mode pour Optaland.
+ *
+ * Permission : staffmode.use.optaland
+ *
+ * /staff       -> donne les items staff + lance /fly et /god (au nom du staff)
+ * /staff chat  -> chat staff
+ * /tp <joueur> -> tp au joueur (en mode staff) sinon /tp vanilla
+ * /survie      -> survie
+ *
+ * Items staff :
+ *   - Blaze Rod  -> taper un joueur (aucun degat) lance /invsee <joueur>
+ *   - Breeze Rod -> taper un joueur = freeze / unfreeze (interne)
+ *   - Gray Dye   -> clic droit lance /sqlvanish
+ *
+ * Les commandes (/fly /god /sqlvanish /invsee) sont configurables dans configstaff.yml.
+ */
 public class StaffMode extends LoadedPlugin implements Listener {
 
     static final String PERM = "staffmode.use.optaland";
 
     private final Set<UUID> staffMode = ConcurrentHashMap.newKeySet();
-    private final Set<UUID> vanished  = ConcurrentHashMap.newKeySet();
     private final Set<UUID> frozen    = ConcurrentHashMap.newKeySet();
 
     private final Map<UUID, ItemStack[]> savedInv   = new ConcurrentHashMap<>();
@@ -69,6 +85,12 @@ public class StaffMode extends LoadedPlugin implements Listener {
     private boolean roleEnabled = true;
     private String  defaultRole = "default";
     private boolean luckPermsPresent = false;
+
+    // Commandes deleguees (configurables).
+    private String cmdFly    = "fly";
+    private String cmdGod    = "god";
+    private String cmdVanish = "sqlvanish";
+    private String cmdInvsee = "invsee %player%";
 
     private final Set<String> myCommands = new HashSet<>();
     private File file;
@@ -106,7 +128,6 @@ public class StaffMode extends LoadedPlugin implements Listener {
                 if (staffMode.contains(p.getUniqueId())) exitStaff(p, true, false);
             }
             frozen.clear();
-            showEverything();
 
             try { HandlerList.unregisterAll(this); } catch (Throwable ignored) {}
 
@@ -128,12 +149,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
         getLogger().info("[StaffMode] desactive.");
     }
 
-    /**
-     * Retire tout listener StaffMode fantome laisse par un chargement precedent.
-     * Apres un /plreload, l'ancienne instance reste enregistree (autre classloader) et
-     * ses listeners (god, taper, vanish) tournent en parallele avec un etat vide -> tout
-     * a l'air "casse". On compare par NOM de classe pour attraper les autres classloaders.
-     */
+    /** Retire tout listener StaffMode fantome laisse par un /plreload precedent. */
     private void unregisterStaleListeners() {
         try {
             String myClass = getClass().getName();
@@ -148,44 +164,56 @@ public class StaffMode extends LoadedPlugin implements Listener {
         } catch (Throwable ignored) {}
     }
 
+    // ===================== CONFIG =====================
+
     private static final String DEFAULT_CONFIG =
             "# ============================================\n" +
             "#            StaffMode - Optaland\n" +
             "# ============================================\n" +
-            "# Fichier cree automatiquement au demarrage.\n" +
             "\n" +
             "role:\n" +
-            "  # true  = le plugin gere le role (LuckPerms) automatiquement.\n" +
-            "  # false = le plugin ne touche jamais aux roles.\n" +
             "  enabled: true\n" +
+            "  default: \"default\"\n" +
             "\n" +
-            "  # Role donne au staff quand il N'EST PAS en mode staff.\n" +
-            "  # Quand il repasse en mode staff, il retrouve le role qu'il avait avant.\n" +
-            "  default: \"default\"\n";
+            "# Commandes lancees AU NOM du staff.\n" +
+            "# %player% = le joueur vise (pour invsee).\n" +
+            "commands:\n" +
+            "  fly: \"fly\"\n" +
+            "  god: \"god\"\n" +
+            "  vanish: \"sqlvanish\"\n" +
+            "  invsee: \"invsee %player%\"\n";
 
     private void loadConfig() {
-        roleEnabled = true;
-        defaultRole = "default";
+        roleEnabled = true; defaultRole = "default";
+        cmdFly = "fly"; cmdGod = "god"; cmdVanish = "sqlvanish"; cmdInvsee = "invsee %player%";
         try {
             File dir = configFile.getParentFile();
             if (dir != null && !dir.exists()) dir.mkdirs();
             if (!configFile.exists()) {
-                try (java.io.FileWriter w = new java.io.FileWriter(configFile)) {
-                    w.write(DEFAULT_CONFIG);
-                }
+                try (java.io.FileWriter w = new java.io.FileWriter(configFile)) { w.write(DEFAULT_CONFIG); }
                 getLogger().info("[StaffMode] configstaff.yml cree.");
             }
             YamlConfiguration cfg = YamlConfiguration.loadConfiguration(configFile);
             boolean changed = false;
-            if (!cfg.contains("role.enabled")) { cfg.set("role.enabled", true); changed = true; }
-            if (!cfg.contains("role.default")) { cfg.set("role.default", "default"); changed = true; }
+            if (!cfg.contains("role.enabled"))    { cfg.set("role.enabled", true); changed = true; }
+            if (!cfg.contains("role.default"))    { cfg.set("role.default", "default"); changed = true; }
+            if (!cfg.contains("commands.fly"))    { cfg.set("commands.fly", "fly"); changed = true; }
+            if (!cfg.contains("commands.god"))    { cfg.set("commands.god", "god"); changed = true; }
+            if (!cfg.contains("commands.vanish")) { cfg.set("commands.vanish", "sqlvanish"); changed = true; }
+            if (!cfg.contains("commands.invsee")) { cfg.set("commands.invsee", "invsee %player%"); changed = true; }
             roleEnabled = cfg.getBoolean("role.enabled", true);
             defaultRole = cfg.getString("role.default", "default");
+            cmdFly    = cfg.getString("commands.fly", "fly");
+            cmdGod    = cfg.getString("commands.god", "god");
+            cmdVanish = cfg.getString("commands.vanish", "sqlvanish");
+            cmdInvsee = cfg.getString("commands.invsee", "invsee %player%");
             if (changed) cfg.save(configFile);
         } catch (Throwable t) {
-            getLogger().warning("[StaffMode] config role KO : " + t.getMessage());
+            getLogger().warning("[StaffMode] config KO : " + t.getMessage());
         }
     }
+
+    // ===================== ROLE (LuckPerms) =====================
 
     private boolean hasLuckPerms() {
         try { return Bukkit.getPluginManager().getPlugin("LuckPerms") != null; }
@@ -229,6 +257,17 @@ public class StaffMode extends LoadedPlugin implements Listener {
         persist();
     }
 
+    // ===================== COMMANDES DELEGUEES =====================
+
+    /** Lance une commande au nom du joueur. */
+    private void runAs(Player p, String command) {
+        if (command == null || command.isBlank()) return;
+        try { Bukkit.dispatchCommand(p, command); }
+        catch (Throwable t) { getLogger().warning("[StaffMode] commande KO (" + command + ") : " + t.getMessage()); }
+    }
+
+    // ===================== ENREGISTREMENT COMMANDE =====================
+
     private CommandMap getCommandMap() {
         try {
             Object server = Bukkit.getServer();
@@ -247,9 +286,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
                 return (Map<String, Command>) f.get(map);
             } catch (NoSuchFieldException e) {
                 c = c.getSuperclass();
-            } catch (Exception e) {
-                return null;
-            }
+            } catch (Exception e) { return null; }
         }
         return null;
     }
@@ -334,14 +371,10 @@ public class StaffMode extends LoadedPlugin implements Listener {
         return false;
     }
 
-    private boolean isStaffPlayer(Player p) {
-        return p.hasPermission(PERM) || staffMembers.contains(p.getUniqueId());
-    }
-
     private boolean handleCommand(CommandSender sender, String[] args) {
         if (args.length >= 1 && args[0].equalsIgnoreCase("chat")) {
-            if (!(sender instanceof Player) && !isStaff(sender)) { send(sender, "Pas la permission.", NamedTextColor.RED); return true; }
             if (sender instanceof Player && !isStaff(sender)) { send(sender, "Pas la permission.", NamedTextColor.RED); return true; }
+            if (!(sender instanceof Player) && !isStaff(sender)) { send(sender, "Pas la permission.", NamedTextColor.RED); return true; }
             if (args.length < 2) { send(sender, "Usage: /staff chat <message>", NamedTextColor.RED); return true; }
             StringBuilder sb = new StringBuilder();
             for (int i = 1; i < args.length; i++) { if (i > 1) sb.append(' '); sb.append(args[i]); }
@@ -373,14 +406,15 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     private List<String> handleTab(CommandSender s, String[] a) {
         if (a.length == 1) {
-            List<String> subs = new ArrayList<>(List.of("chat"));
             List<String> out = new ArrayList<>();
             String x = a[0].toLowerCase(Locale.ROOT);
-            for (String o : subs) if (o.startsWith(x)) out.add(o);
+            for (String o : List.of("chat")) if (o.startsWith(x)) out.add(o);
             return out;
         }
         return List.of();
     }
+
+    // ===================== ENTREE / SORTIE STAFF =====================
 
     private void enterStaff(Player p) {
         UUID u = p.getUniqueId();
@@ -405,24 +439,25 @@ public class StaffMode extends LoadedPlugin implements Listener {
         giveStaffItems(p);
 
         staffMode.add(u);
-        vanished.remove(u);
-
-        p.setAllowFlight(true);
-        p.setFlying(true);
-        p.setFireTicks(0);
-
         p.updateInventory();
-        refreshVisibility();
-        send(p, "Mode staff ACTIVE. (god + fly)", NamedTextColor.GREEN);
+
+        // Lance /fly et /god au nom du staff (au tick suivant, apres application du role).
+        try {
+            Bukkit.getScheduler().runTask((Plugin) getHost(), () -> { runAs(p, cmdFly); runAs(p, cmdGod); });
+        } catch (Throwable t) {
+            runAs(p, cmdFly); runAs(p, cmdGod);
+        }
+
+        send(p, "Mode staff ACTIVE.", NamedTextColor.GREEN);
     }
 
     private void exitStaff(Player p, boolean restore, boolean announce) {
         UUID u = p.getUniqueId();
         staffMode.remove(u);
-        vanished.remove(u);
 
-        p.setFlying(false);
-        p.setAllowFlight(false);
+        // On coupe /fly et /god AVANT de retirer le role (tant qu'il a encore ses perms).
+        runAs(p, cmdFly);
+        runAs(p, cmdGod);
 
         if (restore) restoreInventory(p);
 
@@ -436,7 +471,6 @@ public class StaffMode extends LoadedPlugin implements Listener {
         persist();
 
         p.updateInventory();
-        refreshVisibility();
         if (announce) send(p, "Mode staff DESACTIVE.", NamedTextColor.GRAY);
     }
 
@@ -456,20 +490,12 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     private void giveStaffItems(Player p) {
         p.getInventory().setItem(SLOT_INV, named(Material.BLAZE_ROD, "Voir inventaire", NamedTextColor.GOLD,
-                "Tape un joueur pour ouvrir son inventaire.", "(aucun degat)"));
+                "Tape un joueur pour /invsee.", "(aucun degat)"));
         p.getInventory().setItem(SLOT_FREEZE, named(Material.BREEZE_ROD, "Freeze / Unfreeze", NamedTextColor.AQUA,
                 "Tape un joueur pour le freeze ou le unfreeze."));
-        p.getInventory().setItem(SLOT_VANISH, dyeItem(false));
+        p.getInventory().setItem(SLOT_VANISH, named(Material.GRAY_DYE, "Vanish", NamedTextColor.GRAY,
+                "Clic droit pour /sqlvanish."));
         p.getInventory().setHeldItemSlot(SLOT_INV);
-    }
-
-    private ItemStack dyeItem(boolean vanishOn) {
-        if (vanishOn) {
-            return named(Material.LIME_DYE, "Vanish : ON", NamedTextColor.GREEN,
-                    "Clic droit pour redevenir visible.");
-        }
-        return named(Material.GRAY_DYE, "Vanish : OFF", NamedTextColor.GRAY,
-                "Clic droit pour passer en vanish.");
     }
 
     private ItemStack named(Material mat, String name, NamedTextColor color, String... lore) {
@@ -490,62 +516,25 @@ public class StaffMode extends LoadedPlugin implements Listener {
     private ItemStack[] deepClone(ItemStack[] src) {
         if (src == null) return null;
         ItemStack[] out = new ItemStack[src.length];
-        for (int i = 0; i < src.length; i++) {
-            out[i] = (src[i] == null) ? null : src[i].clone();
-        }
+        for (int i = 0; i < src.length; i++) out[i] = (src[i] == null) ? null : src[i].clone();
         return out;
     }
 
-    private void setVanish(Player p, boolean on) {
-        UUID u = p.getUniqueId();
-        if (on) vanished.add(u); else vanished.remove(u);
-        p.getInventory().setItemInMainHand(dyeItem(on));
-        refreshVisibility();
-        send(p, on ? "Tu es maintenant en VANISH." : "Tu n'es plus en vanish.",
-                on ? NamedTextColor.GREEN : NamedTextColor.GRAY);
-    }
+    // ===================== EVENTS =====================
 
-    @SuppressWarnings("deprecation")
-    private void refreshVisibility() {
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            boolean viewerStaff = isStaffPlayer(viewer);
-            for (Player target : Bukkit.getOnlinePlayers()) {
-                if (viewer.equals(target)) continue;
-                if (vanished.contains(target.getUniqueId()) && !viewerStaff) {
-                    viewer.hidePlayer(target);
-                } else {
-                    viewer.showPlayer(target);
-                }
-            }
-        }
-    }
-
-    @SuppressWarnings("deprecation")
-    private void showEverything() {
-        for (Player viewer : Bukkit.getOnlinePlayers())
-            for (Player target : Bukkit.getOnlinePlayers())
-                if (!viewer.equals(target)) viewer.showPlayer(target);
-    }
-
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void onDamage(EntityDamageEvent e) {
-        if (e.getEntity() instanceof Player p && staffMode.contains(p.getUniqueId())) {
-            e.setCancelled(true);
-        }
-    }
-
+    // ---- Blaze rod (/invsee) + Breeze rod (freeze) en tapant ----
     @EventHandler(priority = EventPriority.HIGH)
     public void onHit(EntityDamageByEntityEvent e) {
         if (!(e.getDamager() instanceof Player a)) return;
         if (!staffMode.contains(a.getUniqueId())) return;
         if (!(e.getEntity() instanceof Player victim)) {
-            e.setCancelled(true);
+            e.setCancelled(true); // un staff ne fait jamais de degat
             return;
         }
         Material hand = a.getInventory().getItemInMainHand().getType();
         if (hand == Material.BLAZE_ROD) {
             e.setCancelled(true);
-            a.openInventory(victim.getInventory());
+            runAs(a, cmdInvsee.replace("%player%", victim.getName()));
         } else if (hand == Material.BREEZE_ROD) {
             e.setCancelled(true);
             toggleFreeze(a, victim);
@@ -566,6 +555,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
         }
     }
 
+    // ---- Clic droit teinture = /sqlvanish ----
     @EventHandler
     public void onInteract(PlayerInteractEvent e) {
         Player p = e.getPlayer();
@@ -577,10 +567,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
         Material m = item.getType();
         if (m == Material.GRAY_DYE) {
             e.setCancelled(true);
-            setVanish(p, true);
-        } else if (m == Material.LIME_DYE) {
-            e.setCancelled(true);
-            setVanish(p, false);
+            runAs(p, cmdVanish);
         } else if (m == Material.BLAZE_ROD || m == Material.BREEZE_ROD) {
             e.setCancelled(true);
         }
@@ -594,25 +581,20 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     @EventHandler
     public void onInvClick(InventoryClickEvent e) {
-        if (e.getWhoClicked() instanceof Player p && staffMode.contains(p.getUniqueId())) {
-            e.setCancelled(true);
-        }
+        if (e.getWhoClicked() instanceof Player p && staffMode.contains(p.getUniqueId())) e.setCancelled(true);
     }
 
     @EventHandler
     public void onInvDrag(InventoryDragEvent e) {
-        if (e.getWhoClicked() instanceof Player p && staffMode.contains(p.getUniqueId())) {
-            e.setCancelled(true);
-        }
+        if (e.getWhoClicked() instanceof Player p && staffMode.contains(p.getUniqueId())) e.setCancelled(true);
     }
 
     @EventHandler
     public void onPickup(EntityPickupItemEvent e) {
-        if (e.getEntity() instanceof Player p && staffMode.contains(p.getUniqueId())) {
-            e.setCancelled(true);
-        }
+        if (e.getEntity() instanceof Player p && staffMode.contains(p.getUniqueId())) e.setCancelled(true);
     }
 
+    // ---- Freeze ----
     @EventHandler
     public void onMove(PlayerMoveEvent e) {
         if (!frozen.contains(e.getPlayer().getUniqueId())) return;
@@ -634,7 +616,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     @EventHandler(ignoreCancelled = true)
     public void onFrozenPlace(BlockPlaceEvent e) {
-        if (frozen.contains(e.getPlayer().getUniqueId())) { e.setCancelled(true); }
+        if (frozen.contains(e.getPlayer().getUniqueId())) e.setCancelled(true);
     }
 
     @EventHandler
@@ -649,7 +631,6 @@ public class StaffMode extends LoadedPlugin implements Listener {
     public void onJoin(PlayerJoinEvent e) {
         Player p = e.getPlayer();
         if (pendingRestore.contains(p.getUniqueId())) restoreFromPending(p);
-        refreshVisibility();
     }
 
     @EventHandler
@@ -658,16 +639,14 @@ public class StaffMode extends LoadedPlugin implements Listener {
         UUID u = p.getUniqueId();
         if (staffMode.contains(u)) {
             staffMode.remove(u);
-            vanished.remove(u);
-            p.setFlying(false);
-            p.setAllowFlight(false);
             applyRoleOnExit(p);
             pendingRestore.add(u);
             persist();
-            refreshVisibility();
         }
         frozen.remove(u);
     }
+
+    // ===================== PERSISTANCE =====================
 
     private void restoreFromPending(Player p) {
         UUID u = p.getUniqueId();
@@ -771,9 +750,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
             if (savedArmor.get(u) != null) cfg.set(path + ".armor", Arrays.asList(savedArmor.get(u)));
             if (savedOff.get(u) != null)   cfg.set(path + ".offhand", savedOff.get(u));
         }
-        for (Map.Entry<UUID, String> e : previousRole.entrySet()) {
-            cfg.set("roles." + e.getKey(), e.getValue());
-        }
+        for (Map.Entry<UUID, String> e : previousRole.entrySet()) cfg.set("roles." + e.getKey(), e.getValue());
         List<String> sm = new ArrayList<>();
         for (UUID u : staffMembers) sm.add(u.toString());
         cfg.set("staffMembers", sm);
