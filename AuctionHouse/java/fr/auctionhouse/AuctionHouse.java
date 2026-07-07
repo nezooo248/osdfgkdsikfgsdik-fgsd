@@ -83,7 +83,7 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
             }
             return true;
         });
-        getLogger().info("AuctionHouse active.");
+        getLogger().info("AuctionHouse active. Listeners (menu + confirmation) enregistres.");
     }
 
     private VaultEco economy() {
@@ -234,9 +234,38 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         return display;
     }
 
+    // Titres de nos menus : servent de filet de securite si le holder ne correspond pas
+    // (ex: apres un /reload, l'inventaire ouvert vient d'un ancien classloader).
+    private static final String T_MENU    = "Hotel des ventes";
+    private static final String T_SEARCH  = "Recherche :";
+    private static final String T_CONFIRM = "Confirmer l'achat";
+
+    private String viewTitle(InventoryClickEvent e) {
+        try { return PlainTextComponentSerializer.plainText().serialize(e.getView().title()); }
+        catch (Throwable t) { return ""; }
+    }
+    private String viewTitle(InventoryDragEvent e) {
+        try { return PlainTextComponentSerializer.plainText().serialize(e.getView().title()); }
+        catch (Throwable t) { return ""; }
+    }
+
     @EventHandler
     public void onClick(InventoryClickEvent event) {
-        if (!(event.getInventory().getHolder() instanceof AuctionHolder holder)) return;
+        if (!(event.getInventory().getHolder() instanceof AuctionHolder holder)) {
+            // Ce n'est pas un AuctionHolder. Si c'est la confirmation, on laisse onConfirmClick gerer.
+            if (event.getInventory().getHolder() instanceof ConfirmHolder) return;
+            // Sinon : si le TITRE est un de nos menus (holder perdu apres reload), on bloque quand meme
+            // le clic pour empecher de voler l'objet, puis on referme.
+            String t = viewTitle(event);
+            if (t.startsWith(T_MENU) || t.startsWith(T_SEARCH)) {
+                event.setCancelled(true);
+                if (event.getWhoClicked() instanceof Player p) {
+                    p.closeInventory();
+                    p.sendMessage(msg("Menu expire, rouvre l'hotel des ventes avec /ah.", NamedTextColor.YELLOW));
+                }
+            }
+            return;
+        }
         event.setCancelled(true);
         if (!(event.getWhoClicked() instanceof Player player)) return;
 
@@ -362,7 +391,14 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
 
     @EventHandler
     public void onConfirmClick(InventoryClickEvent event) {
-        if (!(event.getInventory().getHolder() instanceof ConfirmHolder holder)) return;
+        if (!(event.getInventory().getHolder() instanceof ConfirmHolder holder)) {
+            // Filet de securite : menu de confirmation "orphelin" (apres reload) -> on bloque et referme.
+            if (viewTitle(event).startsWith(T_CONFIRM)) {
+                event.setCancelled(true);
+                if (event.getWhoClicked() instanceof Player p) p.closeInventory();
+            }
+            return;
+        }
         event.setCancelled(true);
         if (!(event.getWhoClicked() instanceof Player player)) return;
 
@@ -381,6 +417,12 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
     public void onDrag(InventoryDragEvent event) {
         if (event.getInventory().getHolder() instanceof AuctionHolder
                 || event.getInventory().getHolder() instanceof ConfirmHolder) {
+            event.setCancelled(true);
+            return;
+        }
+        // Filet de securite par titre (holder perdu apres reload).
+        String t = viewTitle(event);
+        if (t.startsWith(T_MENU) || t.startsWith(T_SEARCH) || t.startsWith(T_CONFIRM)) {
             event.setCancelled(true);
         }
     }
