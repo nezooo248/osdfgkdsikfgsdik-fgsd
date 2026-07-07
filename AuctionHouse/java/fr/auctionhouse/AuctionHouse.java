@@ -578,6 +578,9 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         }
         @Override public Inventory getInventory() { return inventory; }
     }
+
+    /**
+     * Acces a l'economie Vault entierement par reflexion : aucun import de Vault,
      * donc rien a ajouter au classpath de compilation. Vault reste requis au runtime.
      */
     private static final class VaultEco {
