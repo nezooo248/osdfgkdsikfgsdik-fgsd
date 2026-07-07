@@ -7,10 +7,6 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
-/**
- * Holder du menu principal du clan. Sert a identifier le GUI et a savoir
- * quel membre correspond a quel slot cliquable.
- */
 public class ClanMenuHolder implements InventoryHolder {
 
     private final String clanName;
@@ -21,20 +17,10 @@ public class ClanMenuHolder implements InventoryHolder {
         this.clanName = clanName;
     }
 
-    public String getClanName() {
-        return clanName;
-    }
-
-    public Map<Integer, UUID> getSlotToMember() {
-        return slotToMember;
-    }
-
-    public void setInventory(Inventory inventory) {
-        this.inventory = inventory;
-    }
+    public String getClanName() { return clanName; }
+    public Map<Integer, UUID> getSlotToMember() { return slotToMember; }
+    public void setInventory(Inventory inventory) { this.inventory = inventory; }
 
     @Override
-    public Inventory getInventory() {
-        return inventory;
-    }
+    public Inventory getInventory() { return inventory; }
 }
