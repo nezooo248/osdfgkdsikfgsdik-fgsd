@@ -1,0 +1,277 @@
+package fr.pickaxe;
+
+import fr.loader.api.LoadedPlugin;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
+import org.bukkit.Bukkit;
+import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
+import org.bukkit.Sound;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.HandlerList;
+import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.inventory.ItemFlag;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataContainer;
+import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.plugin.Plugin;
+import org.bukkit.scheduler.BukkitTask;
+import org.bukkit.util.RayTraceResult;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+/**
+ * TempPickaxe - a mettre dans : fr/pickaxe/TempPickaxe.java
+ *
+ * /givepickaxe TEMP [joueur]   (permission : pickaxe.give.staff)
+ *   -> donne une pioche Netherite TEMPORAIRE (24h) qui :
+ *        - casse en 3x3 (dans le plan de la face minee)
+ *        - joue un son d'amethyste a chaque cassage
+ *        - s'auto-detruit apres 24h (l'heure d'expiration est ecrite dans le lore)
+ */
+public class TempPickaxe extends LoadedPlugin implements Listener {
+
+    private static final String PERM = "pickaxe.give.staff";
+    // Duree de vie de la pioche : 24h.
+    private static final long DURATION_MS = 24L * 60L * 60L * 1000L;
+
+    private static final NamespacedKey KEY_PICK   = new NamespacedKey("temppickaxe", "temp");
+    private static final NamespacedKey KEY_EXPIRE = new NamespacedKey("temppickaxe", "expire");
+
+    private static final SimpleDateFormat FMT = new SimpleDateFormat("dd/MM/yyyy 'a' HH:mm");
+
+    private BukkitTask purgeTask;
+
+    // ===================== CYCLE DE VIE =====================
+
+    @Override
+    public void onEnable() {
+        unregisterStaleListeners();
+        registerListener(this);
+
+        registerCommand("givepickaxe", (sender, cmd, label, args) -> {
+            if (!sender.hasPermission(PERM)) {
+                sender.sendMessage(msg("Tu n'as pas la permission " + PERM + ".", NamedTextColor.RED));
+                return true;
+            }
+            if (args.length == 0 || !args[0].equalsIgnoreCase("TEMP")) {
+                sender.sendMessage(msg("Usage : /givepickaxe TEMP [joueur]", NamedTextColor.GRAY));
+                return true;
+            }
+            Player target;
+            if (args.length >= 2) {
+                target = Bukkit.getPlayerExact(args[1]);
+                if (target == null) {
+                    sender.sendMessage(msg("Joueur introuvable : " + args[1], NamedTextColor.RED));
+                    return true;
+                }
+            } else if (sender instanceof Player p) {
+                target = p;
+            } else {
+                sender.sendMessage(msg("Depuis la console, precise un joueur : /givepickaxe TEMP <joueur>", NamedTextColor.RED));
+                return true;
+            }
+
+            long expire = System.currentTimeMillis() + DURATION_MS;
+            giveItem(target, createPickaxe(expire));
+            target.sendMessage(msg("Tu as recu une pioche temporaire. Elle expire le " + FMT.format(new Date(expire)) + ".", NamedTextColor.LIGHT_PURPLE));
+            if (!sender.equals(target)) {
+                sender.sendMessage(msg("Pioche temporaire donnee a " + target.getName() + ".", NamedTextColor.GREEN));
+            }
+            return true;
+        });
+
+        // Tache periodique : detruit les pioches expirees (toutes les 60s).
+        try {
+            purgeTask = Bukkit.getScheduler().runTaskTimer((Plugin) getHost(), this::purgeExpired, 20L * 60, 20L * 60);
+        } catch (Throwable t) {
+            getLogger().warning("[TempPickaxe] scheduler indisponible, purge auto desactivee (la verification au cassage reste active).");
+        }
+
+        getLogger().info("TempPickaxe active.");
+    }
+
+    @Override
+    public void onDisable() {
+        if (purgeTask != null) { try { purgeTask.cancel(); } catch (Throwable ignored) {} }
+        try { HandlerList.unregisterAll(this); } catch (Throwable ignored) {}
+        getLogger().info("TempPickaxe desactive.");
+    }
+
+    private void unregisterStaleListeners() {
+        try {
+            String myClass = getClass().getName();
+            for (HandlerList hl : HandlerList.getHandlerLists()) {
+                for (org.bukkit.plugin.RegisteredListener rl : hl.getRegisteredListeners()) {
+                    Object l = rl.getListener();
+                    if (l != null && l != this && l.getClass().getName().equals(myClass)) {
+                        try { hl.unregister(rl); } catch (Throwable ignored) {}
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    // ===================== CREATION =====================
+
+    private ItemStack createPickaxe(long expire) {
+        ItemStack is = new ItemStack(Material.NETHERITE_PICKAXE);
+        ItemMeta meta = is.getItemMeta();
+        if (meta != null) {
+            meta.displayName(Component.text("Optaland Pickaxe", NamedTextColor.GOLD, TextDecoration.BOLD)
+                    .decoration(TextDecoration.ITALIC, false));
+
+            List<Component> lore = new ArrayList<>();
+            lore.add(line("Casse en 3x3", NamedTextColor.AQUA));
+            lore.add(line("Duree : 24h", NamedTextColor.GRAY));
+            lore.add(line("Expire le " + FMT.format(new Date(expire)), NamedTextColor.RED));
+            lore.add(Component.empty());
+            lore.add(line("TEMP", NamedTextColor.DARK_GRAY));
+            meta.lore(lore);
+
+            meta.setUnbreakable(true);
+            meta.addItemFlags(ItemFlag.HIDE_UNBREAKABLE);
+            try { meta.addEnchant(Enchantment.EFFICIENCY, 5, true); } catch (Throwable ignored) {}
+
+            PersistentDataContainer pdc = meta.getPersistentDataContainer();
+            pdc.set(KEY_PICK, PersistentDataType.BYTE, (byte) 1);
+            pdc.set(KEY_EXPIRE, PersistentDataType.LONG, expire);
+
+            is.setItemMeta(meta);
+        }
+        return is;
+    }
+
+    // ===================== CASSAGE 3x3 + SON =====================
+
+    @EventHandler(ignoreCancelled = true)
+    public void onBreak(BlockBreakEvent e) {
+        Player p = e.getPlayer();
+        ItemStack tool = p.getInventory().getItemInMainHand();
+        if (!isOurPickaxe(tool)) return;
+
+        // Expiree ? On la detruit et on annule le cassage.
+        long expire = getExpire(tool);
+        if (expire > 0 && System.currentTimeMillis() > expire) {
+            p.getInventory().setItemInMainHand(null);
+            p.updateInventory();
+            p.sendMessage(msg("Ta pioche temporaire a expire.", NamedTextColor.RED));
+            e.setCancelled(true);
+            return;
+        }
+
+        // Son d'amethyste.
+        p.getWorld().playSound(e.getBlock().getLocation(), Sound.BLOCK_AMETHYST_BLOCK_BREAK, 1f, 1f);
+
+        // Casse le 3x3 autour du bloc mine (le bloc central est deja gere par l'event).
+        Block center = e.getBlock();
+        BlockFace face = getFace(p);
+        for (Block b : area3x3(center, face)) {
+            if (b.equals(center)) continue;
+            if (canBreak(b)) b.breakNaturally(tool);
+        }
+    }
+
+    /** Renvoie les 9 blocs du plan 3x3 selon la face regardee. */
+    private List<Block> area3x3(Block center, BlockFace face) {
+        List<Block> out = new ArrayList<>(9);
+        boolean vertical = (face == BlockFace.UP || face == BlockFace.DOWN);
+        boolean zAxis = (face == BlockFace.NORTH || face == BlockFace.SOUTH);
+        for (int a = -1; a <= 1; a++) {
+            for (int b = -1; b <= 1; b++) {
+                if (vertical)      out.add(center.getRelative(a, 0, b));   // plan horizontal
+                else if (zAxis)    out.add(center.getRelative(a, b, 0));   // plan X/Y
+                else               out.add(center.getRelative(0, b, a));   // plan Z/Y (EST/OUEST)
+            }
+        }
+        return out;
+    }
+
+    private boolean canBreak(Block b) {
+        if (b.getType().isAir()) return false;
+        if (b.isLiquid()) return false;
+        // Ignore les blocs incassables (bedrock, barrier... hardness < 0).
+        return b.getType().getHardness() >= 0f;
+    }
+
+    /** Determine la face visee par le joueur (pour orienter le 3x3). */
+    private BlockFace getFace(Player p) {
+        try {
+            RayTraceResult rt = p.rayTraceBlocks(6.0);
+            if (rt != null && rt.getHitBlockFace() != null) return rt.getHitBlockFace();
+        } catch (Throwable ignored) {}
+        // Repli : selon l'angle de vue.
+        float pitch = p.getLocation().getPitch();
+        if (pitch > 45f) return BlockFace.UP;      // regarde le sol -> plan horizontal
+        if (pitch < -45f) return BlockFace.DOWN;
+        return p.getFacing(); // NORTH/EAST/SOUTH/WEST
+    }
+
+    // ===================== EXPIRATION =====================
+
+    private void purgeExpired() {
+        long now = System.currentTimeMillis();
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            boolean removed = false;
+            ItemStack[] contents = p.getInventory().getContents();
+            for (int i = 0; i < contents.length; i++) {
+                ItemStack it = contents[i];
+                if (isOurPickaxe(it)) {
+                    long ex = getExpire(it);
+                    if (ex > 0 && now > ex) {
+                        p.getInventory().setItem(i, null);
+                        removed = true;
+                    }
+                }
+            }
+            if (removed) {
+                p.updateInventory();
+                p.playSound(p.getLocation(), Sound.ENTITY_ITEM_BREAK, 1f, 1f);
+                p.sendMessage(msg("Ta pioche temporaire a expire et s'est detruite.", NamedTextColor.RED));
+            }
+        }
+    }
+
+    private boolean isOurPickaxe(ItemStack it) {
+        if (it == null || it.getType() != Material.NETHERITE_PICKAXE) return false;
+        ItemMeta meta = it.getItemMeta();
+        if (meta == null) return false;
+        return meta.getPersistentDataContainer().has(KEY_PICK, PersistentDataType.BYTE);
+    }
+
+    private long getExpire(ItemStack it) {
+        ItemMeta meta = it.getItemMeta();
+        if (meta == null) return 0L;
+        Long v = meta.getPersistentDataContainer().get(KEY_EXPIRE, PersistentDataType.LONG);
+        return v == null ? 0L : v;
+    }
+
+    // ===================== UTILITAIRES =====================
+
+    private void giveItem(Player p, ItemStack item) {
+        for (ItemStack leftover : p.getInventory().addItem(item).values()) {
+            p.getWorld().dropItemNaturally(p.getLocation(), leftover);
+        }
+    }
+
+    static final Component PREFIX = Component.text("Pioche ", NamedTextColor.GOLD, TextDecoration.BOLD)
+            .append(Component.text("» ", NamedTextColor.DARK_GRAY));
+
+    private Component msg(String text, NamedTextColor color) {
+        return PREFIX.append(Component.text(text, color));
+    }
+
+    private Component line(String text, NamedTextColor color) {
+        return Component.text(text, color).decoration(TextDecoration.ITALIC, false);
+    }
+}
