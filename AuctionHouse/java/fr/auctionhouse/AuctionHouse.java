@@ -40,6 +40,9 @@ import java.util.UUID;
  *   /ah <recherche>    -> menu filtre par correspondance
  *
  * Permissions : ah.use ; ah.sell.<nombre> = limite d'annonces (defaut 5, ah.sell.* = illimite).
+ *
+ * ACHAT : clic sur une annonce -> menu de CONFIRMATION -> l'objet n'est remis
+ *         QUE si l'argent a reellement ete preleve (plus de "gratuit").
  */
 public class AuctionHouse extends LoadedPlugin implements Listener {
 
@@ -278,6 +281,7 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
 
     /** Effectue reellement l'achat (appele apres confirmation). */
     private void doPurchase(Player player, Listing l, String query, int page) {
+        // 1) L'annonce existe toujours ? (empeche le double-achat / spam-clic)
         if (!listings.contains(l)) {
             player.sendMessage(msg("Cette annonce n'existe plus.", NamedTextColor.RED));
             openMenu(player, query, page);
@@ -288,15 +292,29 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
             player.sendMessage(msg("Economie indisponible.", NamedTextColor.RED));
             return;
         }
+        // 2) A-t-il assez d'argent ?
         if (!e.has(player, l.price)) {
             player.sendMessage(msg("Il te faut " + money(l.price) + ".", NamedTextColor.RED));
             openMenu(player, query, page);
             return;
         }
-        e.withdraw(player, l.price);
+        // 3) On RESERVE l'annonce AVANT le paiement (evite qu'un autre l'achete en meme temps).
+        if (!listings.remove(l)) {
+            player.sendMessage(msg("Cette annonce n'existe plus.", NamedTextColor.RED));
+            openMenu(player, query, page);
+            return;
+        }
+        // 4) Prelevement REEL, avec verification du resultat. C'est ici que le "gratuit" est bloque.
+        if (!e.withdraw(player, l.price)) {
+            // Le paiement a echoue -> on remet l'annonce et on ne donne RIEN.
+            listings.add(l);
+            player.sendMessage(msg("Le paiement a echoue, achat annule (rien n'a ete preleve).", NamedTextColor.RED));
+            openMenu(player, query, page);
+            return;
+        }
+        // 5) Paiement OK : on paie le vendeur et on remet l'objet.
         OfflinePlayer seller = Bukkit.getOfflinePlayer(l.seller);
         e.deposit(seller, l.price);
-        listings.remove(l);
         giveItem(player, l.item);
         saveData();
         player.sendMessage(msg("Objet achete pour " + money(l.price) + " !", NamedTextColor.GREEN));
@@ -626,12 +644,39 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
             catch (Throwable t) { return false; }
         }
 
-        void withdraw(OfflinePlayer p, double amount) {
-            try { mWithdraw.invoke(provider, p, amount); } catch (Throwable ignored) {}
+        /**
+         * Preleve l'argent ET renvoie true UNIQUEMENT si la transaction a reussi.
+         * withdrawPlayer renvoie un EconomyResponse : on lit sa methode transactionSuccess().
+         * Si le prelevement echoue (ou leve une erreur), on renvoie false -> l'objet n'est PAS donne.
+         */
+        boolean withdraw(OfflinePlayer p, double amount) {
+            try {
+                Object resp = mWithdraw.invoke(provider, p, amount);
+                return responseSuccess(resp);
+            } catch (Throwable t) {
+                return false;
+            }
         }
 
         void deposit(OfflinePlayer p, double amount) {
             try { mDeposit.invoke(provider, p, amount); } catch (Throwable ignored) {}
+        }
+
+        /** Lit EconomyResponse.transactionSuccess() par reflexion. */
+        private boolean responseSuccess(Object resp) {
+            if (resp == null) return false;
+            try {
+                Object ok = resp.getClass().getMethod("transactionSuccess").invoke(resp);
+                return Boolean.TRUE.equals(ok);
+            } catch (Throwable t) {
+                // Vieux/atypique provider sans transactionSuccess : on retombe sur le champ "type".
+                try {
+                    Object type = resp.getClass().getField("type").get(resp);
+                    return type != null && "SUCCESS".equals(type.toString());
+                } catch (Throwable t2) {
+                    return false; // en cas de doute : on ne donne pas l'objet
+                }
+            }
         }
     }
 }
