@@ -10,6 +10,10 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.Server;
 import org.bukkit.block.CreatureSpawner;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandMap;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Mob;
 import org.bukkit.entity.Player;
@@ -28,6 +32,7 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.potion.PotionType;
 import org.bukkit.plugin.RegisteredServiceProvider;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -64,6 +69,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
     private EconomyHook eco;
     private NamespacedKey keyPrice;
     private NamespacedKey keyTag;
+    private final Set<String> myCommands = new HashSet<>();
 
     @Override
     public void onEnable() {
@@ -79,27 +85,69 @@ public class SuperShop extends LoadedPlugin implements Listener {
         buildPrices();
         registerListener(this);
 
-        registerCommand("shop", (sender, cmd, label, args) -> {
+        forceRegister("shop", (sender, cmd, label, args) -> {
             if (sender instanceof Player p) openMain(p);
             else sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED));
             return true;
         });
-        registerCommand("boutique", (sender, cmd, label, args) -> {
-            if (sender instanceof Player p) openMain(p);
-            else sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED));
-            return true;
-        });
-        registerCommand("vendre", (sender, cmd, label, args) -> {
+        forceRegister("vendre", (sender, cmd, label, args) -> {
             if (sender instanceof Player p) openSellChest(p);
             else sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED));
             return true;
         });
-        registerCommand("sell", (sender, cmd, label, args) -> {
-            if (!(sender instanceof Player p)) { sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED)); return true; }
-            if (args.length > 0 && args[0].equalsIgnoreCase("all")) sellAll(p);
-            else sellHand(p);
-            return true;
-        });
+        syncCommands();
+    }
+
+    // ======================= COMMANDES (force + sync client) =======================
+
+    private CommandMap getCommandMap() {
+        try {
+            Object server = Bukkit.getServer();
+            Method m = server.getClass().getMethod("getCommandMap");
+            return (CommandMap) m.invoke(server);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Command> knownCommands(CommandMap map) {
+        Class<?> c = map.getClass();
+        while (c != null) {
+            try {
+                Field f = c.getDeclaredField("knownCommands");
+                f.setAccessible(true);
+                return (Map<String, Command>) f.get(map);
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /** Enregistre la commande en forcant le label principal (meme s'il est deja pris). */
+    private void forceRegister(String label, CommandExecutor exec) {
+        CommandMap map = getCommandMap();
+        if (map == null) return;
+        Command cmd = new Command(label) {
+            @Override
+            public boolean execute(CommandSender sender, String lbl, String[] args) {
+                return exec.onCommand(sender, this, lbl, args);
+            }
+        };
+        map.register("supershop", cmd);
+        Map<String, Command> known = knownCommands(map);
+        if (known != null) known.put(label, cmd);
+        myCommands.add(label);
+    }
+
+    /** Pousse la liste des commandes aux joueurs (plus de rouge, auto-completion active). */
+    private void syncCommands() {
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            try { p.updateCommands(); } catch (Throwable ignored) {}
+        }
     }
 
     // ======================= PRIX =======================
@@ -571,33 +619,6 @@ public class SuperShop extends LoadedPlugin implements Listener {
         p.sendMessage(Component.text("Vendu x" + amount + " pour " + money(total) + "$").color(NamedTextColor.GOLD));
     }
 
-    private void sellHand(Player p) {
-        ItemStack hand = p.getInventory().getItemInMainHand();
-        if (hand == null || hand.getType().isAir() || !sellable(hand.getType())) {
-            p.sendMessage(Component.text("Objet non vendable en main.").color(NamedTextColor.RED)); return;
-        }
-        int amount = hand.getAmount();
-        double total = priceOf(hand.getType()) * SELL_RATIO * amount;
-        p.getInventory().setItemInMainHand(null);
-        eco.deposit(p, total);
-        p.sendMessage(Component.text("Vendu x" + amount + " pour " + money(total) + "$").color(NamedTextColor.GOLD));
-    }
-
-    private void sellAll(Player p) {
-        double total = 0; int count = 0;
-        ItemStack[] contents = p.getInventory().getContents();
-        for (int i = 0; i < contents.length; i++) {
-            ItemStack it = contents[i];
-            if (it == null || it.getType().isAir() || !sellable(it.getType())) continue;
-            total += priceOf(it.getType()) * SELL_RATIO * it.getAmount();
-            count += it.getAmount();
-            p.getInventory().setItem(i, null);
-        }
-        if (count == 0) { p.sendMessage(Component.text("Rien de vendable.").color(NamedTextColor.RED)); return; }
-        eco.deposit(p, total);
-        p.sendMessage(Component.text("Vendu " + count + " objets pour " + money(total) + "$").color(NamedTextColor.GOLD));
-    }
-
     private boolean sellable(Material m) {
         return m != Material.SPAWNER && !m.name().endsWith("_SPAWN_EGG") && buyPrices.containsKey(m);
     }
@@ -742,6 +763,18 @@ public class SuperShop extends LoadedPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        CommandMap map = getCommandMap();
+        Map<String, Command> known = (map != null) ? knownCommands(map) : null;
+        if (known != null) {
+            for (String label : myCommands) {
+                Command c = known.remove(label);
+                if (c != null) { try { c.unregister(map); } catch (Throwable ignored) {} }
+                known.remove("supershop:" + label);
+            }
+        }
+        myCommands.clear();
+        syncCommands();
+
         for (Player p : Bukkit.getOnlinePlayers()) {
             if (p.getOpenInventory().getTopInventory().getHolder() instanceof ShopHolder h && "SELL".equals(h.type))
                 p.closeInventory();
