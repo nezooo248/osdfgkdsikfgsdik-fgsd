@@ -16,9 +16,6 @@ import org.bukkit.inventory.ItemStack;
 
 import java.util.UUID;
 
-/**
- * Gere les clics dans les menus de clan.
- */
 public class GUIListener implements Listener {
 
     private static final String PREFIX = "&6&lClans &8» &r";
@@ -65,7 +62,6 @@ public class GUIListener implements Listener {
         }
     }
 
-    // ------------------------------------------------------------------
     private void handleMainMenu(Player p, ClanManager manager, ClanMenuHolder h, int slot) {
         Clan clan = manager.getClan(h.getClanName());
         if (clan == null) {
@@ -79,7 +75,6 @@ public class GUIListener implements Listener {
         ClanGUI.openMember(plugin, p, clan, target);
     }
 
-    // ------------------------------------------------------------------
     private void handleMemberMenu(Player p, ClanManager manager, MemberMenuHolder h, int slot) {
         Clan clan = manager.getClan(h.getClanName());
         if (clan == null) {
@@ -101,7 +96,7 @@ public class GUIListener implements Listener {
                 if (kicked != null) {
                     kicked.sendMessage(Text.c(PREFIX + "&cTu as ete exclu du clan &e" + clan.getName() + "&c."));
                 }
-                broadcast(manager, clan, "&e" + targetName + " &7a ete exclu du clan.");
+                broadcast(clan, "&e" + targetName + " &7a ete exclu du clan.");
                 ClanGUI.openMain(plugin, p, clan);
             } else {
                 msg(p, "&cImpossible d'exclure ce membre.");
@@ -125,12 +120,11 @@ public class GUIListener implements Listener {
                     if (t != null) t.sendMessage(Text.c(PREFIX + "&7Tu es de nouveau &fmembre &7du clan."));
                 }
             }
-            // Rafraichit le menu pour mettre a jour le bouton de grade
             ClanGUI.openMember(plugin, p, clan, target);
         }
     }
 
-    private void broadcast(ClanManager manager, Clan clan, String message) {
+    private void broadcast(Clan clan, String message) {
         for (UUID u : clan.getMembers()) {
             Player online = Bukkit.getPlayer(u);
             if (online != null) online.sendMessage(Text.c(PREFIX + message));
