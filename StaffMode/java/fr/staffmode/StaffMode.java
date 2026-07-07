@@ -6,6 +6,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
+import org.bukkit.Material;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandMap;
 import org.bukkit.command.CommandSender;
@@ -17,13 +18,16 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.ItemStack;
 
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -37,18 +41,29 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * Permission : staffmode.use.optaland
  *
- * /staff       -> active / desactive le mode staff : GOD + FLY (en interne, aucune commande)
+ * /staff       -> active / desactive : GOD + FLY (interne) ; l'inventaire est VIDE,
+ *                 mis de cote et sauvegarde sur disque, puis restaure a la sortie.
  * /staff chat  -> chat staff
  * /tp <joueur> -> tp au joueur (en mode staff) sinon /tp vanilla
  * /survie      -> survie
  *
  * ROLE (LuckPerms) : hors staff -> "default" ; en staff -> role d'avant. Configurable.
+ *
+ * Deconnexion en mode staff : l'inventaire n'est PAS restaure en direct (une modif
+ * d'inventaire au QuitEvent n'est pas toujours ecrite). On le garde sur disque et on
+ * le rend a la reconnexion, comme apres un crash.
  */
 public class StaffMode extends LoadedPlugin implements Listener {
 
     static final String PERM = "staffmode.use.optaland";
 
     private final Set<UUID> staffMode = ConcurrentHashMap.newKeySet();
+
+    // Inventaires mis de cote pendant le mode staff.
+    private final Map<UUID, ItemStack[]> savedInv   = new ConcurrentHashMap<>();
+    private final Map<UUID, ItemStack[]> savedArmor = new ConcurrentHashMap<>();
+    private final Map<UUID, ItemStack>   savedOff   = new ConcurrentHashMap<>();
+    private final Set<UUID> pendingRestore = ConcurrentHashMap.newKeySet();
 
     private final Map<UUID, String> previousRole = new ConcurrentHashMap<>();
     private final Set<UUID> staffMembers = ConcurrentHashMap.newKeySet();
@@ -58,19 +73,25 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     private final Set<String> myCommands = new HashSet<>();
     private File file;
+    private File backupFile;
     private File configFile;
 
     @Override
     public void onEnable() {
         this.file = new File(getHost().getDataFolder(), "staffmode.yml");
+        this.backupFile = new File(getHost().getDataFolder(), "inv-backups.yml");
         this.configFile = new File(getHost().getDataFolder(), "configstaff.yml");
         loadConfig();
         this.luckPermsPresent = hasLuckPerms();
-        loadData();
-        unregisterStaleListeners(); // vire les listeners fantomes d'un ancien /plreload
+        loadPending();
+        unregisterStaleListeners();
         registerListener(this);
         registerStaffCommand();
         syncCommands();
+
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            if (pendingRestore.contains(p.getUniqueId())) restoreFromPending(p);
+        }
         getLogger().info("[StaffMode] active." + (roleEnabled && !luckPermsPresent
                 ? " (role active mais LuckPerms introuvable -> gestion de role ignoree)" : ""));
     }
@@ -79,7 +100,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
     public void onDisable() {
         try {
             for (Player p : new ArrayList<>(Bukkit.getOnlinePlayers())) {
-                if (staffMode.contains(p.getUniqueId())) exitStaff(p, false);
+                if (staffMode.contains(p.getUniqueId())) exitStaff(p, true, false);
             }
             try { HandlerList.unregisterAll(this); } catch (Throwable ignored) {}
 
@@ -312,7 +333,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
         if (!(sender instanceof Player p)) { send(sender, "Joueurs uniquement (sauf /staff chat).", NamedTextColor.RED); return true; }
         if (!isStaff(p)) { send(p, "Tu n'as pas la permission " + PERM + ".", NamedTextColor.RED); return true; }
         if (args.length == 0) {
-            if (staffMode.contains(p.getUniqueId())) exitStaff(p, true);
+            if (staffMode.contains(p.getUniqueId())) exitStaff(p, true, true);
             else enterStaff(p);
             return true;
         }
@@ -346,31 +367,80 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     private void enterStaff(Player p) {
         UUID u = p.getUniqueId();
+
+        // Sauvegarde de l'inventaire normal.
+        ItemStack[] contents = deepClone(p.getInventory().getContents());
+        ItemStack[] armorC   = deepClone(p.getInventory().getArmorContents());
+        ItemStack off = p.getInventory().getItemInOffHand();
+        off = (off == null ? new ItemStack(Material.AIR) : off.clone());
+
+        savedInv.put(u, contents);
+        savedArmor.put(u, armorC);
+        savedOff.put(u, off);
+
         staffMembers.add(u);
         applyRoleOnEnter(p);
 
+        persist();
+        writeBackup(p, contents, armorC, off);
+
+        // On vide l'inventaire (mis de cote) — aucun item staff donne.
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(new ItemStack[4]);
+        p.getInventory().setItemInOffHand(null);
+
         staffMode.add(u);
 
-        // GOD + FLY en interne (aucune commande).
+        // GOD + FLY en interne.
         p.setAllowFlight(true);
         p.setFlying(true);
         p.setFireTicks(0);
 
-        persist();
+        p.updateInventory();
         send(p, "Mode staff ACTIVE. (god + fly)", NamedTextColor.GREEN);
     }
 
-    private void exitStaff(Player p, boolean announce) {
+    private void exitStaff(Player p, boolean restore, boolean announce) {
         UUID u = p.getUniqueId();
         staffMode.remove(u);
 
-        // Coupe le fly (le god s'arrete automatiquement : plus dans staffMode).
         p.setFlying(false);
         p.setAllowFlight(false);
 
+        if (restore) restoreInventory(p);
+
         applyRoleOnExit(p);
+
+        savedInv.remove(u);
+        savedArmor.remove(u);
+        savedOff.remove(u);
+        pendingRestore.remove(u);
+        clearBackup(u);
         persist();
+
+        p.updateInventory();
         if (announce) send(p, "Mode staff DESACTIVE.", NamedTextColor.GRAY);
+    }
+
+    private void restoreInventory(Player p) {
+        UUID u = p.getUniqueId();
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(new ItemStack[4]);
+        p.getInventory().setItemInOffHand(null);
+        ItemStack[] inv = savedInv.get(u);
+        if (inv != null) p.getInventory().setContents(inv);
+        ItemStack[] armor = savedArmor.get(u);
+        if (armor != null) p.getInventory().setArmorContents(armor);
+        ItemStack off = savedOff.get(u);
+        if (off != null) p.getInventory().setItemInOffHand(off);
+        p.updateInventory();
+    }
+
+    private ItemStack[] deepClone(ItemStack[] src) {
+        if (src == null) return null;
+        ItemStack[] out = new ItemStack[src.length];
+        for (int i = 0; i < src.length; i++) out[i] = (src[i] == null) ? null : src[i].clone();
+        return out;
     }
 
     // ===================== GOD =====================
@@ -382,25 +452,105 @@ public class StaffMode extends LoadedPlugin implements Listener {
         }
     }
 
+    // ===================== JOIN / QUIT =====================
+
+    @EventHandler
+    public void onJoin(PlayerJoinEvent e) {
+        Player p = e.getPlayer();
+        if (pendingRestore.contains(p.getUniqueId())) restoreFromPending(p);
+    }
+
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         Player p = e.getPlayer();
         UUID u = p.getUniqueId();
         if (staffMode.contains(u)) {
+            // On ne restaure PAS l'inventaire en direct : on garde tout sur disque et on
+            // le rend a la reconnexion (comme apres un crash).
             staffMode.remove(u);
             p.setFlying(false);
             p.setAllowFlight(false);
             applyRoleOnExit(p);
+            pendingRestore.add(u);
             persist();
         }
     }
 
-    // ===================== PERSISTANCE (roles + membres staff) =====================
+    // ===================== PERSISTANCE =====================
 
-    private void loadData() {
+    private void restoreFromPending(Player p) {
+        UUID u = p.getUniqueId();
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(new ItemStack[4]);
+        p.getInventory().setItemInOffHand(null);
+        ItemStack[] inv = savedInv.get(u);
+        if (inv != null) p.getInventory().setContents(inv);
+        ItemStack[] armor = savedArmor.get(u);
+        if (armor != null) p.getInventory().setArmorContents(armor);
+        ItemStack off = savedOff.get(u);
+        if (off != null) p.getInventory().setItemInOffHand(off);
+        p.updateInventory();
+
+        savedInv.remove(u);
+        savedArmor.remove(u);
+        savedOff.remove(u);
+        pendingRestore.remove(u);
+        staffMode.remove(u);
+        clearBackup(u);
+        persist();
+        send(p, "Ton inventaire a ete recupere.", NamedTextColor.YELLOW);
+    }
+
+    private void writeBackup(Player p, ItemStack[] contents, ItemStack[] armor, ItemStack off) {
+        if (backupFile == null) return;
+        YamlConfiguration cfg = backupFile.exists()
+                ? YamlConfiguration.loadConfiguration(backupFile) : new YamlConfiguration();
+        String path = "backup." + p.getUniqueId();
+        cfg.set(path + ".name", p.getName());
+        cfg.set(path + ".time", System.currentTimeMillis());
+        cfg.set(path + ".contents", Arrays.asList(contents));
+        cfg.set(path + ".armor", Arrays.asList(armor));
+        if (off != null && off.getType() != Material.AIR) cfg.set(path + ".offhand", off);
+        try {
+            File dir = backupFile.getParentFile();
+            if (dir != null && !dir.exists()) dir.mkdirs();
+            cfg.save(backupFile);
+        } catch (IOException e) {
+            getLogger().warning("[StaffMode] backup inventaire KO : " + e.getMessage());
+        }
+    }
+
+    private void clearBackup(UUID u) {
+        if (backupFile == null || !backupFile.exists()) return;
+        YamlConfiguration cfg = YamlConfiguration.loadConfiguration(backupFile);
+        if (cfg.contains("backup." + u)) {
+            cfg.set("backup." + u, null);
+            try { cfg.save(backupFile); } catch (IOException ignored) {}
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void loadPending() {
+        savedInv.clear(); savedArmor.clear(); savedOff.clear(); pendingRestore.clear();
         previousRole.clear(); staffMembers.clear();
         if (file == null || !file.exists()) return;
         YamlConfiguration cfg = YamlConfiguration.loadConfiguration(file);
+
+        ConfigurationSection cs = cfg.getConfigurationSection("pending");
+        if (cs != null) {
+            for (String key : cs.getKeys(false)) {
+                try {
+                    UUID u = UUID.fromString(key);
+                    List<ItemStack> contents = (List<ItemStack>) (List<?>) cfg.getList("pending." + key + ".contents");
+                    List<ItemStack> armor    = (List<ItemStack>) (List<?>) cfg.getList("pending." + key + ".armor");
+                    if (contents != null) savedInv.put(u, contents.toArray(new ItemStack[0]));
+                    if (armor != null)    savedArmor.put(u, armor.toArray(new ItemStack[0]));
+                    ItemStack off = cfg.getItemStack("pending." + key + ".offhand");
+                    if (off != null) savedOff.put(u, off);
+                    pendingRestore.add(u);
+                } catch (Throwable ignored) {}
+            }
+        }
 
         ConfigurationSection rs = cfg.getConfigurationSection("roles");
         if (rs != null) {
@@ -421,10 +571,23 @@ public class StaffMode extends LoadedPlugin implements Listener {
     private void persist() {
         if (file == null) return;
         YamlConfiguration cfg = new YamlConfiguration();
+
+        Set<UUID> keys = new HashSet<>();
+        keys.addAll(savedInv.keySet());
+        keys.addAll(savedArmor.keySet());
+        for (UUID u : keys) {
+            String path = "pending." + u;
+            if (savedInv.get(u) != null)   cfg.set(path + ".contents", Arrays.asList(savedInv.get(u)));
+            if (savedArmor.get(u) != null) cfg.set(path + ".armor", Arrays.asList(savedArmor.get(u)));
+            if (savedOff.get(u) != null)   cfg.set(path + ".offhand", savedOff.get(u));
+        }
+
         for (Map.Entry<UUID, String> e : previousRole.entrySet()) cfg.set("roles." + e.getKey(), e.getValue());
+
         List<String> sm = new ArrayList<>();
         for (UUID u : staffMembers) sm.add(u.toString());
         cfg.set("staffMembers", sm);
+
         try {
             File dir = file.getParentFile();
             if (dir != null && !dir.exists()) dir.mkdirs();
