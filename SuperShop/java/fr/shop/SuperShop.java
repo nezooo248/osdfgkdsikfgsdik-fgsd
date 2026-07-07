@@ -23,7 +23,9 @@ import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.BlockStateMeta;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.PotionMeta;
 import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.potion.PotionType;
 import org.bukkit.plugin.RegisteredServiceProvider;
 
 import java.lang.reflect.Method;
@@ -82,6 +84,11 @@ public class SuperShop extends LoadedPlugin implements Listener {
             else sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED));
             return true;
         });
+        registerCommand("boutique", (sender, cmd, label, args) -> {
+            if (sender instanceof Player p) openMain(p);
+            else sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED));
+            return true;
+        });
         registerCommand("vendre", (sender, cmd, label, args) -> {
             if (sender instanceof Player p) openSellChest(p);
             else sender.sendMessage(Component.text("Reserve aux joueurs.").color(NamedTextColor.RED));
@@ -130,6 +137,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
         categoryNames.put("mobs", "Loot de mobs");            categoryIcons.put("mobs", Material.ROTTEN_FLESH);
         categoryNames.put("redstone", "Redstone");            categoryIcons.put("redstone", Material.REDSTONE);
         categoryNames.put("divers", "Divers");                categoryIcons.put("divers", Material.ENDER_PEARL);
+        categoryNames.put("potions", "Potions");              categoryIcons.put("potions", Material.POTION);
         categoryNames.put("tousblocs", "TOUS les blocs");     categoryIcons.put("tousblocs", Material.GRASS_BLOCK);
         categoryNames.put("spawners", "Spawners");            categoryIcons.put("spawners", Material.SPAWNER);
 
@@ -247,6 +255,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
         register("divers", Material.BOOK, 45);
         register("divers", Material.NAME_TAG, 800);
         register("divers", Material.EXPERIENCE_BOTTLE, 150);
+        register("divers", Material.ENDER_PEARL, 90);
         register("divers", Material.ENDER_EYE, 180);
         register("divers", Material.BLAZE_POWDER, 35);
         register("divers", Material.GLOWSTONE_DUST, 15);
@@ -310,7 +319,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
         h.inv = inv;
         fill(inv, filler());
 
-        int[] slots = {20, 21, 22, 23, 24, 29, 30, 31};
+        int[] slots = {20, 21, 22, 23, 24, 29, 30, 31, 32};
         int i = 0;
         for (String cat : categoryNames.keySet()) {
             if (i >= slots.length) break;
@@ -334,6 +343,11 @@ public class SuperShop extends LoadedPlugin implements Listener {
                 Class<?> cls = et.getEntityClass();
                 if (cls == null || !Mob.class.isAssignableFrom(cls)) continue;
                 items.add(spawnerDisplay(et));
+            }
+        } else if (cat.equals("potions")) {
+            for (PotionType pt : PotionType.values()) {
+                ItemStack disp = potionDisplay(pt);
+                if (disp != null) items.add(disp);
             }
         } else {
             for (Material m : categories.getOrDefault(cat, List.of())) items.add(itemDisplay(m));
@@ -363,10 +377,12 @@ public class SuperShop extends LoadedPlugin implements Listener {
 
     // ======================= GUI : TRANSACTION (1 objet) =======================
 
-    private void openItem(Player p, Material mat, String mob, String backCat, int backPage) {
+    private void openItem(Player p, Material mat, String mob, String potion, String backCat, int backPage) {
         ShopHolder h = new ShopHolder("ITEM");
-        h.material = mat; h.mob = mob; h.category = backCat; h.page = backPage;
-        h.unit = (mob != null) ? spawnerPrice(EntityType.valueOf(mob)) : priceOf(mat);
+        h.material = mat; h.mob = mob; h.potion = potion; h.category = backCat; h.page = backPage;
+        if (potion != null) h.unit = potionPrice(PotionType.valueOf(potion));
+        else if (mob != null) h.unit = spawnerPrice(EntityType.valueOf(mob));
+        else h.unit = priceOf(mat);
         h.amount = 1;
         Inventory inv = Bukkit.createInventory(h, 54, Component.text("Transaction").color(NamedTextColor.DARK_PURPLE));
         h.inv = inv;
@@ -379,13 +395,15 @@ public class SuperShop extends LoadedPlugin implements Listener {
         fill(inv, filler());
 
         // objet au centre
-        ItemStack center = (h.mob != null) ? spawnerItem(EntityType.valueOf(h.mob)) : new ItemStack(h.material, Math.max(1, h.amount));
+        ItemStack center = (h.potion != null) ? potionItem(PotionType.valueOf(h.potion))
+                : (h.mob != null) ? spawnerItem(EntityType.valueOf(h.mob))
+                : new ItemStack(h.material, Math.max(1, h.amount));
         ItemMeta cm = center.getItemMeta();
         double total = h.unit * h.amount;
         List<Component> lore = new ArrayList<>();
         lore.add(line("Quantite : " + h.amount, NamedTextColor.WHITE));
         lore.add(line("Prix achat : " + money(total) + "$", NamedTextColor.GREEN));
-        if (h.mob == null) lore.add(line("Prix vente : " + money(total * SELL_RATIO) + "$", NamedTextColor.GOLD));
+        if (h.mob == null && h.potion == null) lore.add(line("Prix vente : " + money(total * SELL_RATIO) + "$", NamedTextColor.GOLD));
         cm.lore(lore);
         center.setItemMeta(cm);
         inv.setItem(13, center);
@@ -402,7 +420,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
         // acheter / vendre
         ItemStack buy = named(Material.EMERALD_BLOCK, "ACHETER  (" + money(total) + "$)", NamedTextColor.GREEN, "Clique pour acheter");
         tag(buy, "BUY"); inv.setItem(48, buy);
-        if (h.mob == null) {
+        if (h.mob == null && h.potion == null) {
             ItemStack sell = named(Material.GOLD_BLOCK, "VENDRE  (" + money(total * SELL_RATIO) + "$)", NamedTextColor.GOLD, "Vend depuis ton inventaire");
             tag(sell, "SELL"); inv.setItem(50, sell);
         }
@@ -423,26 +441,32 @@ public class SuperShop extends LoadedPlugin implements Listener {
     }
 
     private void processSellChest(Player p, Inventory inv) {
+        boolean ecoOk = eco.ready();
         double total = 0;
         int sold = 0;
         ItemStack[] contents = inv.getContents();
         for (int i = 0; i < contents.length; i++) {
             ItemStack it = contents[i];
             if (it == null || it.getType().isAir()) continue;
-            if (sellable(it.getType())) {
+            inv.setItem(i, null);
+            if (ecoOk && sellable(it.getType())) {
                 total += priceOf(it.getType()) * SELL_RATIO * it.getAmount();
                 sold += it.getAmount();
-                inv.setItem(i, null);
             } else {
-                // objet non vendable : on le rend
+                // non vendable (ou economie indispo) : on rend l'objet
                 for (ItemStack rest : p.getInventory().addItem(it).values())
                     p.getWorld().dropItemNaturally(p.getLocation(), rest);
-                inv.setItem(i, null);
             }
         }
-        if (sold > 0 && eco.ready()) {
+        if (!ecoOk) {
+            p.sendMessage(Component.text("Economie indisponible : objets rendus.").color(NamedTextColor.RED));
+            return;
+        }
+        if (sold > 0) {
             eco.deposit(p, total);
-            p.sendMessage(Component.text("Vendu " + sold + " objets pour " + money(total) + "$").color(NamedTextColor.GOLD));
+            p.sendMessage(Component.text("Vendu " + sold + " objets pour " + money(total) + "$ (meme prix qu'en boutique)").color(NamedTextColor.GOLD));
+        } else {
+            p.sendMessage(Component.text("Rien de vendable : objets rendus.").color(NamedTextColor.YELLOW));
         }
     }
 
@@ -479,8 +503,9 @@ public class SuperShop extends LoadedPlugin implements Listener {
                     case "NEXT" -> openCategory(p, h.category, h.page + 1);
                     case "MENU" -> openMain(p);
                     default -> {
-                        if (t.startsWith("ITEM:")) openItem(p, Material.valueOf(t.substring(5)), null, h.category, h.page);
-                        else if (t.startsWith("SPAWN:")) openItem(p, Material.SPAWNER, t.substring(6), h.category, h.page);
+                        if (t.startsWith("ITEM:")) openItem(p, Material.valueOf(t.substring(5)), null, null, h.category, h.page);
+                        else if (t.startsWith("SPAWN:")) openItem(p, Material.SPAWNER, t.substring(6), null, h.category, h.page);
+                        else if (t.startsWith("POTION:")) openItem(p, Material.POTION, null, t.substring(7), h.category, h.page);
                     }
                 }
             }
@@ -519,9 +544,16 @@ public class SuperShop extends LoadedPlugin implements Listener {
         if (eco.balance(p) < total) { p.sendMessage(Component.text("Pas assez d'argent (" + money(total) + "$).").color(NamedTextColor.RED)); return; }
         if (!eco.withdraw(p, total)) { p.sendMessage(Component.text("Transaction refusee.").color(NamedTextColor.RED)); return; }
 
-        ItemStack give = (h.mob != null) ? spawnerItem(EntityType.valueOf(h.mob)) : new ItemStack(h.material, h.amount);
-        for (ItemStack rest : p.getInventory().addItem(give).values())
-            p.getWorld().dropItemNaturally(p.getLocation(), rest);
+        if (h.potion != null) {
+            ItemStack pot = potionItem(PotionType.valueOf(h.potion));
+            for (int i = 0; i < h.amount; i++)
+                for (ItemStack rest : p.getInventory().addItem(pot.clone()).values())
+                    p.getWorld().dropItemNaturally(p.getLocation(), rest);
+        } else {
+            ItemStack give = (h.mob != null) ? spawnerItem(EntityType.valueOf(h.mob)) : new ItemStack(h.material, h.amount);
+            for (ItemStack rest : p.getInventory().addItem(give).values())
+                p.getWorld().dropItemNaturally(p.getLocation(), rest);
+        }
 
         p.sendMessage(Component.text("Achete x" + h.amount + " pour " + money(total) + "$").color(NamedTextColor.GREEN));
         renderItem(p, h);
@@ -629,6 +661,42 @@ public class SuperShop extends LoadedPlugin implements Listener {
         return it;
     }
 
+    private ItemStack potionItem(PotionType pt) {
+        ItemStack it = new ItemStack(Material.POTION);
+        ItemMeta meta = it.getItemMeta();
+        if (meta instanceof PotionMeta pm) {
+            try { pm.setBasePotionType(pt); } catch (Throwable ignored) {}
+        }
+        meta.displayName(line("Potion " + pretty(pt.name()), NamedTextColor.LIGHT_PURPLE));
+        it.setItemMeta(meta);
+        return it;
+    }
+
+    private ItemStack potionDisplay(PotionType pt) {
+        try {
+            ItemStack it = potionItem(pt);
+            ItemMeta meta = it.getItemMeta();
+            List<Component> lore = new ArrayList<>();
+            lore.add(line("Achat : " + money(potionPrice(pt)) + "$", NamedTextColor.GREEN));
+            lore.add(line("Clique pour acheter", NamedTextColor.GRAY));
+            meta.lore(lore);
+            it.setItemMeta(meta);
+            tag(it, "POTION:" + pt.name());
+            return it;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private double potionPrice(PotionType pt) {
+        String n = pt.name();
+        if (n.equals("WATER") || n.equals("MUNDANE") || n.equals("THICK") || n.equals("AWKWARD")) return 100;
+        double base = 350;
+        if (n.startsWith("STRONG_")) base += 200;
+        if (n.startsWith("LONG_")) base += 100;
+        return base;
+    }
+
     private ItemStack named(Material mat, String name, NamedTextColor color, String loreLine) {
         ItemStack it = new ItemStack(mat);
         ItemMeta meta = it.getItemMeta();
@@ -689,6 +757,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
         int page;
         Material material;
         String mob;
+        String potion;
         double unit;
         int amount = 1;
         Inventory inv;
