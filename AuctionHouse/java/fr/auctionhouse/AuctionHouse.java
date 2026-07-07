@@ -21,6 +21,11 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.permissions.PermissionAttachmentInfo;
 import org.bukkit.plugin.ServicesManager;
 
+import java.io.File;
+import java.io.IOException;
+import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.file.YamlConfiguration;
+
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -43,10 +48,13 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
 
     private final List<Listing> listings = new ArrayList<>();
     private VaultEco eco; // wrapper reflexif
+    private File dataFile; // fichier de sauvegarde des annonces
 
     @Override
     public void onEnable() {
         registerListener(this);
+        setupDataFile();
+        loadData();
         eco = VaultEco.hook();
         if (eco == null) {
             getLogger().warning("Vault/economie introuvable : les ventes seront bloquees tant qu'aucune eco n'est presente.");
@@ -122,6 +130,21 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         player.getInventory().setItemInMainHand(null);
         listings.add(new Listing(player.getUniqueId(), player.getName(), sold, price));
         player.sendMessage(msg("Objet mis en vente pour " + money(price) + ".", NamedTextColor.GREEN));
+        broadcastSale(player, sold, price);
+        saveData();
+    }
+
+    /** Annonce serveur : "JOUEUR a mis en vente ITEM pour la somme de X" (rouge -> orange -> jaune, gras). */
+    private void broadcastSale(Player seller, ItemStack item, double price) {
+        Component announce = Component.text("[HDV] ", NamedTextColor.GOLD, TextDecoration.BOLD)
+                .append(Component.text(seller.getName(), NamedTextColor.RED, TextDecoration.BOLD))
+                .append(Component.text(" a mis en vente ", NamedTextColor.RED, TextDecoration.BOLD))
+                .append(itemName(item).color(NamedTextColor.GOLD).decorate(TextDecoration.BOLD))
+                .append(Component.text(" x" + item.getAmount(), NamedTextColor.GOLD, TextDecoration.BOLD))
+                .append(Component.text(" pour la somme de ", NamedTextColor.YELLOW, TextDecoration.BOLD))
+                .append(Component.text(money(price), NamedTextColor.YELLOW, TextDecoration.BOLD))
+                .append(Component.text(" !", NamedTextColor.YELLOW, TextDecoration.BOLD));
+        Bukkit.getServer().sendMessage(announce);
     }
 
     private void handleList(Player player) {
@@ -162,6 +185,7 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         listings.remove(l);
         giveItem(player, l.item);
         player.sendMessage(msg("Annonce retiree, objet recupere.", NamedTextColor.GREEN));
+        saveData();
     }
 
     // ---------- Menu (GUI) ----------
@@ -212,9 +236,11 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         if (!(event.getInventory().getHolder() instanceof AuctionHolder holder)) return;
         event.setCancelled(true);
         if (!(event.getWhoClicked() instanceof Player player)) return;
-        if (!holder.inventory.equals(event.getClickedInventory())) return;
 
-        int slot = event.getSlot();
+        // Le clic doit avoir lieu dans l'inventaire du haut (la GUI), pas dans celui du joueur.
+        int raw = event.getRawSlot();
+        if (raw < 0 || raw >= holder.inventory.getSize()) return;
+        int slot = raw; // dans l'inventaire du haut, raw slot == slot
         if (slot == 49) { player.closeInventory(); return; }
         if (slot == 45) { openMenu(player, holder.query, holder.page - 1); return; }
         if (slot == 53) { openMenu(player, holder.query, holder.page + 1); return; }
@@ -232,6 +258,7 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         if (l.seller.equals(player.getUniqueId())) {
             listings.remove(l);
             giveItem(player, l.item);
+            saveData();
             player.sendMessage(msg("Annonce annulee, objet recupere.", NamedTextColor.GREEN));
             openMenu(player, holder.query, holder.page);
             return;
@@ -245,26 +272,98 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
             player.sendMessage(msg("Il te faut " + money(l.price) + ".", NamedTextColor.RED));
             return;
         }
+        // Au lieu d'acheter directement, on demande confirmation.
+        openConfirm(player, l, holder.query, holder.page);
+    }
+
+    /** Effectue reellement l'achat (appele apres confirmation). */
+    private void doPurchase(Player player, Listing l, String query, int page) {
+        if (!listings.contains(l)) {
+            player.sendMessage(msg("Cette annonce n'existe plus.", NamedTextColor.RED));
+            openMenu(player, query, page);
+            return;
+        }
+        VaultEco e = economy();
+        if (e == null) {
+            player.sendMessage(msg("Economie indisponible.", NamedTextColor.RED));
+            return;
+        }
+        if (!e.has(player, l.price)) {
+            player.sendMessage(msg("Il te faut " + money(l.price) + ".", NamedTextColor.RED));
+            openMenu(player, query, page);
+            return;
+        }
         e.withdraw(player, l.price);
         OfflinePlayer seller = Bukkit.getOfflinePlayer(l.seller);
         e.deposit(seller, l.price);
         listings.remove(l);
         giveItem(player, l.item);
+        saveData();
         player.sendMessage(msg("Objet achete pour " + money(l.price) + " !", NamedTextColor.GREEN));
 
         Player onlineSeller = Bukkit.getPlayer(l.seller);
         if (onlineSeller != null) {
             onlineSeller.sendMessage(msg(player.getName() + " a achete ton objet pour " + money(l.price) + ".", NamedTextColor.GREEN));
         }
-        openMenu(player, holder.query, holder.page);
+        openMenu(player, query, page);
+    }
+
+    // ---------- Menu de confirmation ----------
+
+    private void openConfirm(Player player, Listing l, String query, int page) {
+        ConfirmHolder holder = new ConfirmHolder(l, query, page);
+        Inventory inv = Bukkit.createInventory(holder, 27, Component.text("Confirmer l'achat ?"));
+        holder.inventory = inv;
+
+        // Objet a acheter au centre
+        ItemStack preview = l.item.clone();
+        ItemMeta pm = preview.getItemMeta();
+        List<Component> lore = pm.lore() == null ? new ArrayList<>() : new ArrayList<>(pm.lore());
+        lore.add(Component.empty());
+        lore.add(line("Vendeur : " + l.sellerName, NamedTextColor.GRAY));
+        lore.add(line("Prix : " + money(l.price), NamedTextColor.GREEN));
+        pm.lore(lore);
+        preview.setItemMeta(pm);
+        inv.setItem(13, preview);
+
+        // Confirmer (vert) a gauche, annuler (rouge) a droite
+        ItemStack yes = new ItemStack(Material.LIME_WOOL);
+        ItemMeta ym = yes.getItemMeta();
+        ym.displayName(line("CONFIRMER l'achat (" + money(l.price) + ")", NamedTextColor.GREEN));
+        yes.setItemMeta(ym);
+        for (int s : new int[]{10, 11}) inv.setItem(s, yes);
+
+        ItemStack no = new ItemStack(Material.RED_WOOL);
+        ItemMeta nm = no.getItemMeta();
+        nm.displayName(line("ANNULER", NamedTextColor.RED));
+        no.setItemMeta(nm);
+        for (int s : new int[]{15, 16}) inv.setItem(s, no);
+
+        player.openInventory(inv);
+    }
+
+    @EventHandler
+    public void onConfirmClick(InventoryClickEvent event) {
+        if (!(event.getInventory().getHolder() instanceof ConfirmHolder holder)) return;
+        event.setCancelled(true);
+        if (!(event.getWhoClicked() instanceof Player player)) return;
+
+        int raw = event.getRawSlot();
+        if (raw < 0 || raw >= holder.inventory.getSize()) return;
+
+        if (raw == 10 || raw == 11) { // CONFIRMER
+            doPurchase(player, holder.listing, holder.query, holder.page);
+        } else if (raw == 15 || raw == 16) { // ANNULER
+            player.sendMessage(msg("Achat annule.", NamedTextColor.YELLOW));
+            openMenu(player, holder.query, holder.page);
+        }
     }
 
     @EventHandler
     public void onDrag(InventoryDragEvent event) {
-        if (event.getInventory().getHolder() instanceof AuctionHolder) {
-            for (int raw : event.getRawSlots()) {
-                if (raw < 54) { event.setCancelled(true); return; }
-            }
+        if (event.getInventory().getHolder() instanceof AuctionHolder
+                || event.getInventory().getHolder() instanceof ConfirmHolder) {
+            event.setCancelled(true);
         }
     }
 
@@ -346,8 +445,13 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
     }
 
     private void giveItem(Player p, ItemStack item) {
+        boolean dropped = false;
         for (ItemStack leftover : p.getInventory().addItem(item.clone()).values()) {
             p.getWorld().dropItemNaturally(p.getLocation(), leftover);
+            dropped = true;
+        }
+        if (dropped) {
+            p.sendMessage(msg("Inventaire plein : l'objet est tombe au sol a tes pieds.", NamedTextColor.YELLOW));
         }
     }
 
@@ -373,9 +477,65 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         return Component.text(text).color(color).decoration(TextDecoration.ITALIC, false);
     }
 
+    // ---------- Persistance (sauvegarde sur disque) ----------
+
+    private void setupDataFile() {
+        File folder;
+        try {
+            // getHost() renvoie le plugin hote : on utilise son dossier de donnees.
+            folder = getHost().getDataFolder();
+        } catch (Throwable t) {
+            folder = new File("plugins" + File.separator + "AuctionHouse");
+        }
+        if (!folder.exists()) folder.mkdirs();
+        dataFile = new File(folder, "listings.yml");
+    }
+
+    private void loadData() {
+        if (dataFile == null || !dataFile.exists()) return;
+        YamlConfiguration cfg = YamlConfiguration.loadConfiguration(dataFile);
+        ConfigurationSection sec = cfg.getConfigurationSection("listings");
+        if (sec == null) return;
+        int loaded = 0;
+        for (String key : sec.getKeys(false)) {
+            String base = "listings." + key;
+            try {
+                UUID seller = UUID.fromString(cfg.getString(base + ".seller"));
+                String name = cfg.getString(base + ".sellerName", "?");
+                double price = cfg.getDouble(base + ".price");
+                ItemStack item = cfg.getItemStack(base + ".item");
+                if (item != null) {
+                    listings.add(new Listing(seller, name, item, price));
+                    loaded++;
+                }
+            } catch (Exception ignored) {}
+        }
+        getLogger().info("AuctionHouse : " + loaded + " annonce(s) chargee(s).");
+    }
+
+    private void saveData() {
+        if (dataFile == null) return;
+        YamlConfiguration cfg = new YamlConfiguration();
+        int i = 0;
+        for (Listing l : listings) {
+            String base = "listings." + i;
+            cfg.set(base + ".seller", l.seller.toString());
+            cfg.set(base + ".sellerName", l.sellerName);
+            cfg.set(base + ".price", l.price);
+            cfg.set(base + ".item", l.item);
+            i++;
+        }
+        try {
+            cfg.save(dataFile);
+        } catch (IOException e) {
+            getLogger().warning("AuctionHouse : echec de sauvegarde des annonces : " + e.getMessage());
+        }
+    }
+
     @Override
     public void onDisable() {
-        getLogger().info("AuctionHouse desactive.");
+        saveData();
+        getLogger().info("AuctionHouse desactive (annonces sauvegardees).");
     }
 
     // ---------- Types internes ----------
@@ -406,8 +566,18 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         @Override public Inventory getInventory() { return inventory; }
     }
 
-    /**
-     * Acces a l'economie Vault entierement par reflexion : aucun import de Vault,
+    private static final class ConfirmHolder implements InventoryHolder {
+        final Listing listing;
+        final String query;
+        final int page;
+        Inventory inventory;
+        ConfirmHolder(Listing listing, String query, int page) {
+            this.listing = listing;
+            this.query = query;
+            this.page = page;
+        }
+        @Override public Inventory getInventory() { return inventory; }
+    }
      * donc rien a ajouter au classpath de compilation. Vault reste requis au runtime.
      */
     private static final class VaultEco {
