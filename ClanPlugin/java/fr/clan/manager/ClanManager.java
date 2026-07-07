@@ -20,9 +20,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-/**
- * Gere toute la logique des clans + la sauvegarde YAML (clans.yml).
- */
 public class ClanManager {
 
     public static final int MAX_MEMBERS = 5;
@@ -30,13 +27,9 @@ public class ClanManager {
     private final ClanPlugin plugin;
     private final File file;
 
-    // Cle = nom du clan en minuscules
     private final Map<String, Clan> clans = new HashMap<>();
-    // uuid joueur -> nom de clan (minuscules)
     private final Map<UUID, String> playerClan = new HashMap<>();
-    // uuid invite -> ensemble de clans (minuscules) qui l'ont invite
     private final Map<UUID, Set<String>> invites = new HashMap<>();
-    // uuid -> dernier pseudo connu (pour /clan info hors ligne)
     private final Map<UUID, String> names = new HashMap<>();
 
     public ClanManager(ClanPlugin plugin) {
@@ -44,18 +37,10 @@ public class ClanManager {
         this.file = new File(plugin.getDataFolder(), "clans.yml");
     }
 
-    // ------------------------------------------------------------------
-    //  Resultats d'operations
-    // ------------------------------------------------------------------
     public enum CreateResult { SUCCESS, ALREADY_IN_CLAN, NAME_TAKEN, INVALID_NAME }
-
     public enum InviteResult { SUCCESS, NO_CLAN, NO_PERMISSION, CLAN_FULL, TARGET_IN_CLAN, ALREADY_INVITED, TARGET_SELF }
-
     public enum JoinResult { SUCCESS, NO_INVITE, CLAN_GONE, CLAN_FULL, ALREADY_IN_CLAN }
 
-    // ------------------------------------------------------------------
-    //  Lookups
-    // ------------------------------------------------------------------
     public Clan getClan(String name) {
         if (name == null) return null;
         return clans.get(name.toLowerCase(Locale.ROOT));
@@ -66,21 +51,14 @@ public class ClanManager {
         return key == null ? null : clans.get(key);
     }
 
-    public boolean hasClan(UUID uuid) {
-        return playerClan.containsKey(uuid);
-    }
+    public boolean hasClan(UUID uuid) { return playerClan.containsKey(uuid); }
 
-    public Collection<Clan> getClans() {
-        return clans.values();
-    }
+    public Collection<Clan> getClans() { return clans.values(); }
 
     public Set<String> getInvites(UUID uuid) {
         return invites.getOrDefault(uuid, Collections.emptySet());
     }
 
-    // ------------------------------------------------------------------
-    //  Pseudos
-    // ------------------------------------------------------------------
     public String getName(UUID uuid) {
         Player online = Bukkit.getPlayer(uuid);
         if (online != null) return online.getName();
@@ -104,9 +82,6 @@ public class ClanManager {
         return name != null && name.matches("[A-Za-z0-9_]{3,16}");
     }
 
-    // ------------------------------------------------------------------
-    //  Operations
-    // ------------------------------------------------------------------
     public CreateResult createClan(Player player, String name) {
         if (hasClan(player.getUniqueId())) return CreateResult.ALREADY_IN_CLAN;
         if (!isValidName(name)) return CreateResult.INVALID_NAME;
@@ -145,7 +120,7 @@ public class ClanManager {
         String key;
         if (clanName == null) {
             if (set.size() == 1) key = set.iterator().next();
-            else return JoinResult.NO_INVITE; // ambigu : il faut preciser
+            else return JoinResult.NO_INVITE;
         } else {
             key = clanName.toLowerCase(Locale.ROOT);
             if (!set.contains(key)) return JoinResult.NO_INVITE;
@@ -166,7 +141,6 @@ public class ClanManager {
         return JoinResult.SUCCESS;
     }
 
-    /** Refuse une (ou toutes) les invitations. Retourne true si quelque chose a ete retire. */
     public boolean deny(Player player, String clanName) {
         Set<String> set = invites.get(player.getUniqueId());
         if (set == null || set.isEmpty()) return false;
@@ -179,11 +153,6 @@ public class ClanManager {
         return removed;
     }
 
-    /**
-     * Exclut un membre. "actor" doit avoir les droits.
-     * - Le chef peut exclure tout le monde sauf lui-meme.
-     * - Un bras droit peut exclure uniquement des membres simples.
-     */
     public boolean kick(Clan clan, UUID actor, UUID target) {
         if (!clan.isMember(target)) return false;
         if (clan.isLeader(target)) return false;
@@ -192,7 +161,7 @@ public class ClanManager {
         if (clan.isLeader(actor)) {
             // ok
         } else if (clan.isOfficer(actor)) {
-            if (clan.isOfficer(target)) return false; // un bras droit ne kick pas un autre bras droit
+            if (clan.isOfficer(target)) return false;
         } else {
             return false;
         }
@@ -203,7 +172,6 @@ public class ClanManager {
         return true;
     }
 
-    /** Promeut un membre simple en bras droit (chef uniquement). */
     public boolean promote(Clan clan, UUID actor, UUID target) {
         if (!clan.canManageRoles(actor)) return false;
         if (!clan.isMember(target)) return false;
@@ -213,7 +181,6 @@ public class ClanManager {
         return true;
     }
 
-    /** Retrograde un bras droit en membre (chef uniquement). */
     public boolean demote(Clan clan, UUID actor, UUID target) {
         if (!clan.canManageRoles(actor)) return false;
         if (!clan.isOfficer(target)) return false;
@@ -222,14 +189,12 @@ public class ClanManager {
         return true;
     }
 
-    /** Un membre (non chef) quitte volontairement le clan. */
     public void leaveClan(Clan clan, UUID uuid) {
         clan.removeMember(uuid);
         playerClan.remove(uuid);
         save();
     }
 
-    /** Dissout entierement un clan. */
     public void disband(Clan clan) {
         String key = clan.getName().toLowerCase(Locale.ROOT);
         for (UUID u : clan.getMembers()) {
@@ -242,9 +207,6 @@ public class ClanManager {
         save();
     }
 
-    // ------------------------------------------------------------------
-    //  Sauvegarde / chargement
-    // ------------------------------------------------------------------
     public void load() {
         clans.clear();
         playerClan.clear();
