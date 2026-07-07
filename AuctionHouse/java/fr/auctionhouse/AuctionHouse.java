@@ -55,6 +55,7 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        unregisterStaleListeners(); // retire tout ancien listener AuctionHouse (fantome apres /plreload)
         registerListener(this);
         setupDataFile();
         loadData();
@@ -599,6 +600,25 @@ public class AuctionHouse extends LoadedPlugin implements Listener {
         try { org.bukkit.event.HandlerList.unregisterAll(this); } catch (Throwable ignored) {}
         saveData();
         getLogger().info("AuctionHouse desactive (annonces sauvegardees).");
+    }
+
+    /**
+     * Supprime tout listener AuctionHouse encore enregistre venant d'un PRECEDENT chargement
+     * (apres un /plreload, l'ancien objet reste actif avec un autre classloader : on le compare
+     * par NOM de classe, pas par identite, pour l'attraper). Rend les reloads auto-nettoyants.
+     */
+    private void unregisterStaleListeners() {
+        try {
+            String myClass = getClass().getName();
+            for (org.bukkit.event.HandlerList hl : org.bukkit.event.HandlerList.getHandlerLists()) {
+                for (org.bukkit.plugin.RegisteredListener rl : hl.getRegisteredListeners()) {
+                    Object l = rl.getListener();
+                    if (l != null && l != this && l.getClass().getName().equals(myClass)) {
+                        try { hl.unregister(rl); } catch (Throwable ignored) {}
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
     }
 
     // ---------- Types internes ----------
