@@ -57,6 +57,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * /staff                 active / desactive le mode staff (god + fly + items + inventaire indropable)
  * /staff chat <message>  parle dans le chat staff (visible uniquement par ceux qui ont la perm)
+ * /tp <joueur>           EN MODE STAFF : te teleporte au joueur (sinon = /tp vanilla normal)
  * /survie                repasse en survie
  *
  * Items donnes en staff :
@@ -182,6 +183,8 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
         registerOne(map, "staff", "Mode staff", "/staff", List.of("mod", "staffmode"),
                 (s, a) -> handleCommand(s, a), (s, a) -> handleTab(s, a));
+        registerOne(map, "tp", "Teleportation staff", "/tp <joueur>", List.of(),
+                (s, a) -> handleTp(s, a), (s, a) -> tabPlayers(a));
         registerOne(map, "survie", "Passe en survie", "/survie", List.of("survival", "surv"),
                 (s, a) -> handleSurvie(s), null);
     }
@@ -209,6 +212,38 @@ public class StaffMode extends LoadedPlugin implements Listener {
         p.setGameMode(GameMode.SURVIVAL);
         send(p, "Tu es maintenant en SURVIE.", NamedTextColor.GREEN);
         return true;
+    }
+
+    /**
+     * /tp <joueur> :
+     *  - staff EN mode staff + un seul argument (nom joueur) -> teleporte au joueur.
+     *  - sinon -> on laisse la commande /tp vanilla faire son travail normal
+     *    (coordonnees, tp d'autres joueurs, etc.), avec les permissions vanilla.
+     */
+    private boolean handleTp(CommandSender s, String[] a) {
+        if (s instanceof Player p && isStaff(p) && staffMode.contains(p.getUniqueId()) && a.length == 1) {
+            Player target = Bukkit.getPlayerExact(a[0]);
+            if (target == null) { send(p, "Joueur introuvable : " + a[0], NamedTextColor.RED); return true; }
+            if (target.equals(p)) { send(p, "Tu ne peux pas te teleporter a toi-meme.", NamedTextColor.RED); return true; }
+            p.teleport(target.getLocation());
+            send(p, "Teleporte a " + target.getName() + ".", NamedTextColor.GREEN);
+            return true;
+        }
+        // Comportement /tp vanilla normal (namespace minecraft: pour ne pas boucler sur notre commande).
+        StringBuilder sb = new StringBuilder("minecraft:tp");
+        for (String arg : a) sb.append(' ').append(arg);
+        Bukkit.dispatchCommand(s, sb.toString());
+        return true;
+    }
+
+    private List<String> tabPlayers(String[] a) {
+        if (a.length != 1) return List.of();
+        String x = a[0].toLowerCase(Locale.ROOT);
+        List<String> out = new ArrayList<>();
+        for (Player o : Bukkit.getOnlinePlayers()) {
+            if (o.getName().toLowerCase(Locale.ROOT).startsWith(x)) out.add(o.getName());
+        }
+        return out;
     }
 
     private void syncCommands() {
