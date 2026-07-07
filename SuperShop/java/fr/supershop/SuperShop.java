@@ -73,6 +73,16 @@ public class SuperShop extends LoadedPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        // Ferme tout menu de shop encore ouvert (y compris d'une ancienne version restee en memoire).
+        // On compare par NOM de classe pour attraper aussi les instances d'un autre classloader.
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            try {
+                InventoryHolder holder = p.getOpenInventory().getTopInventory().getHolder();
+                if (holder != null && holder.getClass().getSimpleName().equals("ShopHolder"))
+                    p.closeInventory();
+            } catch (Throwable ignored) {}
+        }
+
         keyPrice = new NamespacedKey(getHost(), "shop_price");
         keyTag = new NamespacedKey(getHost(), "shop_tag");
 
@@ -361,7 +371,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
         long cb = allBlocks.stream().filter(x -> x.name().contains("COMMAND_BLOCK")).count();
         long spawn = allBlocks.stream().filter(x -> x.name().contains("SPAWNER")).count();
         boolean debris = buyPrices.containsKey(Material.ANCIENT_DEBRIS);
-        getLogger().info("[SuperShop] >>> BUILD-5 <<< | TOUS les blocs = " + allBlocks.size()
+        getLogger().info("[SuperShop] >>> BUILD-6 <<< | TOUS les blocs = " + allBlocks.size()
                 + " | command_block = " + cb + " | spawner = " + spawn
                 + " | ancient_debris enregistre = " + debris);
     }
@@ -883,7 +893,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
         } catch (Throwable t) {
             getLogger().warning("[SuperShop] erreur pendant onDisable : " + t);
         }
-        getLogger().info("[SuperShop] >>> BUILD-5 <<< desactive proprement.");
+        getLogger().info("[SuperShop] >>> BUILD-6 <<< desactive proprement.");
     }
 
     // ======================= CLASSES INTERNES =======================
