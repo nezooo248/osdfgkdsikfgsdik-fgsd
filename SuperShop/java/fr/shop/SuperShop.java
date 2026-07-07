@@ -299,7 +299,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
         register("redstone", Material.STONE_BUTTON, 35);
         register("redstone", Material.TARGET, 220);
 
-        // --- Divers (ENDER_PEARL retire ici : deja dans "mobs") ---
+        // --- Divers ---
         register("divers", Material.TORCH, 18);
         register("divers", Material.STICK, 8);
         register("divers", Material.FLINT, 22);
@@ -307,6 +307,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
         register("divers", Material.BOOK, 110);
         register("divers", Material.NAME_TAG, 2000);
         register("divers", Material.EXPERIENCE_BOTTLE, 380);
+        register("divers", Material.ENDER_PEARL, 240);
         register("divers", Material.ENDER_EYE, 450);
         register("divers", Material.BLAZE_POWDER, 90);
         register("divers", Material.GLOWSTONE_DUST, 40);
@@ -326,6 +327,7 @@ public class SuperShop extends LoadedPlugin implements Listener {
             if (!m.isBlock() || !m.isItem()) continue;
             if (m.isAir()) continue;
             if (blacklist.contains(m)) continue;
+            if (isNonSurvival(m)) continue;              // command block, spawner, etc. (par motif)
             if (m.name().endsWith("_SPAWN_EGG")) continue;
             if (already.contains(m)) continue;           // deja dans une autre categorie -> pas de doublon
             if (!buyPrices.containsKey(m)) buyPrices.put(m, fallbackPrice(m));
@@ -333,6 +335,30 @@ public class SuperShop extends LoadedPlugin implements Listener {
         }
         allBlocks.sort(Comparator.comparing(Enum::name));
         categories.put("tousblocs", allBlocks);
+    }
+
+    /** Bloc non recuperable en survie (creatif uniquement, technique, etc.). Filtre par motif. */
+    private boolean isNonSurvival(Material m) {
+        String n = m.name();
+        return n.contains("COMMAND_BLOCK")            // COMMAND_BLOCK, CHAIN_..., REPEATING_...
+            || n.contains("STRUCTURE")                // STRUCTURE_BLOCK, STRUCTURE_VOID
+            || n.contains("INFESTED")                 // tous les blocs infestes
+            || n.contains("SPAWNER")                  // SPAWNER, TRIAL_SPAWNER
+            || n.contains("SUSPICIOUS")               // SUSPICIOUS_SAND/GRAVEL
+            || n.endsWith("_HEAD") || n.endsWith("_SKULL")   // tetes/cranes (dont PLAYER_HEAD)
+            || n.equals("JIGSAW")
+            || n.equals("BARRIER") || n.equals("LIGHT")
+            || n.equals("BEDROCK")
+            || n.equals("DEBUG_STICK")
+            || n.equals("BUDDING_AMETHYST")
+            || n.equals("REINFORCED_DEEPSLATE")
+            || n.equals("END_PORTAL_FRAME") || n.equals("END_GATEWAY")
+            || n.equals("PETRIFIED_OAK_SLAB")
+            || n.equals("FARMLAND") || n.equals("DIRT_PATH")
+            || n.equals("FROGSPAWN")
+            || n.equals("DRAGON_EGG")
+            || n.equals("VAULT")
+            || n.equals("POWDER_SNOW");
     }
 
     /** Prix estime pour un bloc non defini a la main. Plus haut + unique par bloc. */
