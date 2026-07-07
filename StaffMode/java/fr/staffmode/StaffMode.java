@@ -5,6 +5,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.command.Command;
@@ -22,6 +23,9 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityPickupItemEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
@@ -82,6 +86,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     private final Set<String> myCommands = new HashSet<>();
     private File file;
+    private File backupFile;
 
     // Slots des items staff
     private static final int SLOT_INV   = 0; // blaze rod
@@ -93,6 +98,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
     @Override
     public void onEnable() {
         this.file = new File(getHost().getDataFolder(), "staffmode.yml");
+        this.backupFile = new File(getHost().getDataFolder(), "inv-backups.yml");
         loadPending();
         registerListener(this);
         registerStaffCommand();
@@ -168,14 +174,46 @@ public class StaffMode extends LoadedPlugin implements Listener {
     private void registerStaffCommand() {
         CommandMap map = getCommandMap();
         if (map == null) { getLogger().warning("[StaffMode] CommandMap introuvable."); return; }
-        Command cmd = new Command("staff", "Mode staff", "/staff", List.of("mod", "staffmode")) {
-            @Override public boolean execute(CommandSender s, String l, String[] a) { return handleCommand(s, a); }
-            @Override public List<String> tabComplete(CommandSender s, String alias, String[] a) { return handleTab(s, a); }
+
+        registerOne(map, "staff", "Mode staff", "/staff", List.of("mod", "staffmode"),
+                (s, a) -> handleCommand(s, a), (s, a) -> handleTab(s, a));
+        registerOne(map, "spec", "Passe en spectateur", "/spec", List.of("spectateur", "sp"),
+                (s, a) -> handleSpec(s), null);
+        registerOne(map, "survie", "Passe en survie", "/survie", List.of("survival", "surv"),
+                (s, a) -> handleSurvie(s), null);
+    }
+
+    private interface Exec { boolean run(CommandSender s, String[] a); }
+    private interface Tab { List<String> run(CommandSender s, String[] a); }
+
+    private void registerOne(CommandMap map, String name, String desc, String usage,
+                             List<String> aliases, Exec exec, Tab tab) {
+        Command cmd = new Command(name, desc, usage, aliases) {
+            @Override public boolean execute(CommandSender s, String l, String[] a) { return exec.run(s, a); }
+            @Override public List<String> tabComplete(CommandSender s, String alias, String[] a) {
+                return tab != null ? tab.run(s, a) : List.of();
+            }
         };
         map.register("staffmode", cmd);
         Map<String, Command> known = knownCommands(map);
-        if (known != null) known.put("staff", cmd);
-        myCommands.add("staff");
+        if (known != null) known.put(name, cmd);
+        myCommands.add(name);
+    }
+
+    private boolean handleSpec(CommandSender s) {
+        if (!(s instanceof Player p)) { send(s, "Joueurs uniquement.", NamedTextColor.RED); return true; }
+        if (!isStaff(p)) { send(p, "Tu n'as pas la permission " + PERM + ".", NamedTextColor.RED); return true; }
+        p.setGameMode(GameMode.SPECTATOR);
+        send(p, "Tu es maintenant en SPECTATEUR.", NamedTextColor.GREEN);
+        return true;
+    }
+
+    private boolean handleSurvie(CommandSender s) {
+        if (!(s instanceof Player p)) { send(s, "Joueurs uniquement.", NamedTextColor.RED); return true; }
+        if (!isStaff(p)) { send(p, "Tu n'as pas la permission " + PERM + ".", NamedTextColor.RED); return true; }
+        p.setGameMode(GameMode.SURVIVAL);
+        send(p, "Tu es maintenant en SURVIE.", NamedTextColor.GREEN);
+        return true;
     }
 
     private void syncCommands() {
@@ -251,11 +289,17 @@ public class StaffMode extends LoadedPlugin implements Listener {
         UUID u = p.getUniqueId();
 
         // Sauvegarde de l'inventaire normal.
-        savedInv.put(u, p.getInventory().getContents().clone());
-        savedArmor.put(u, p.getInventory().getArmorContents().clone());
+        ItemStack[] contents = p.getInventory().getContents().clone();
+        ItemStack[] armorC   = p.getInventory().getArmorContents().clone();
         ItemStack off = p.getInventory().getItemInOffHand();
-        savedOff.put(u, off == null ? new ItemStack(Material.AIR) : off.clone());
+        off = (off == null ? new ItemStack(Material.AIR) : off.clone());
+
+        savedInv.put(u, contents);
+        savedArmor.put(u, armorC);
+        savedOff.put(u, off);
         persist();
+        // Sauvegarde de secours sur le disque (filet de securite, jamais ecrasee tant qu'on ne re-entre pas).
+        writeBackup(p, contents, armorC, off);
 
         // On vide et on donne les items staff.
         p.getInventory().clear();
@@ -456,6 +500,29 @@ public class StaffMode extends LoadedPlugin implements Listener {
         if (frozen.contains(e.getPlayer().getUniqueId())) e.setCancelled(true);
     }
 
+    // ---- On ne peut RIEN bouger / donner / ajouter en mode staff : on garde juste les batons ----
+    @EventHandler
+    public void onInvClick(InventoryClickEvent e) {
+        if (e.getWhoClicked() instanceof Player p && staffMode.contains(p.getUniqueId())) {
+            e.setCancelled(true); // verrouille le propre inventaire ET tout inventaire ouvert (lecture seule)
+        }
+    }
+
+    @EventHandler
+    public void onInvDrag(InventoryDragEvent e) {
+        if (e.getWhoClicked() instanceof Player p && staffMode.contains(p.getUniqueId())) {
+            e.setCancelled(true);
+        }
+    }
+
+    // ---- Pas de ramassage d'items en mode staff ----
+    @EventHandler
+    public void onPickup(EntityPickupItemEvent e) {
+        if (e.getEntity() instanceof Player p && staffMode.contains(p.getUniqueId())) {
+            e.setCancelled(true);
+        }
+    }
+
     // ---- Freeze : bloque les deplacements (mais laisse tourner la tete) ----
     @EventHandler
     public void onMove(PlayerMoveEvent e) {
@@ -529,6 +596,25 @@ public class StaffMode extends LoadedPlugin implements Listener {
         staffMode.remove(u);
         persist();
         send(p, "Ton inventaire a ete recupere (redemarrage staff).", NamedTextColor.YELLOW);
+    }
+
+    private void writeBackup(Player p, ItemStack[] contents, ItemStack[] armor, ItemStack off) {
+        if (backupFile == null) return;
+        YamlConfiguration cfg = backupFile.exists()
+                ? YamlConfiguration.loadConfiguration(backupFile) : new YamlConfiguration();
+        String path = "backup." + p.getUniqueId();
+        cfg.set(path + ".name", p.getName());
+        cfg.set(path + ".time", System.currentTimeMillis());
+        cfg.set(path + ".contents", Arrays.asList(contents));
+        cfg.set(path + ".armor", Arrays.asList(armor));
+        if (off != null && off.getType() != Material.AIR) cfg.set(path + ".offhand", off);
+        try {
+            File dir = backupFile.getParentFile();
+            if (dir != null && !dir.exists()) dir.mkdirs();
+            cfg.save(backupFile);
+        } catch (IOException e) {
+            getLogger().warning("[StaffMode] backup inventaire KO : " + e.getMessage());
+        }
     }
 
     @SuppressWarnings("unchecked")
