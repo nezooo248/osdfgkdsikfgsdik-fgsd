@@ -57,6 +57,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * /staff                 active / desactive le mode staff (god + fly + items + inventaire indropable)
  * /staff chat <message>  parle dans le chat staff (visible uniquement par ceux qui ont la perm)
+ * /survie                repasse en survie
  *
  * Items donnes en staff :
  *   - Blaze Rod   -> taper un joueur (aucun degat) ouvre son inventaire
@@ -66,6 +67,10 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * En vanish, les staff se voient entre eux mais sont invisibles pour les autres.
  * L'inventaire "normal" est mis de cote et rendu quand on quitte le mode staff.
+ *
+ * Deconnexion en mode staff : l'inventaire n'est PAS restaure en direct (une modif
+ * d'inventaire dans PlayerQuitEvent n'est pas toujours sauvegardee par le serveur).
+ * On garde le stuff sur le disque et on le rend a la reconnexion, comme apres un crash.
  */
 public class StaffMode extends LoadedPlugin implements Listener {
 
@@ -81,7 +86,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
     private final Map<UUID, ItemStack[]> savedArmor = new ConcurrentHashMap<>();
     private final Map<UUID, ItemStack>   savedOff   = new ConcurrentHashMap<>();
 
-    // A restaurer apres un crash (charge depuis le disque au demarrage)
+    // A restaurer apres un crash ou une deco en staff (charge depuis le disque au demarrage)
     private final Set<UUID> pendingRestore = ConcurrentHashMap.newKeySet();
 
     private final Set<String> myCommands = new HashSet<>();
@@ -177,8 +182,6 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
         registerOne(map, "staff", "Mode staff", "/staff", List.of("mod", "staffmode"),
                 (s, a) -> handleCommand(s, a), (s, a) -> handleTab(s, a));
-        registerOne(map, "spec", "Passe en spectateur", "/spec", List.of("spectateur", "sp"),
-                (s, a) -> handleSpec(s), null);
         registerOne(map, "survie", "Passe en survie", "/survie", List.of("survival", "surv"),
                 (s, a) -> handleSurvie(s), null);
     }
@@ -198,14 +201,6 @@ public class StaffMode extends LoadedPlugin implements Listener {
         Map<String, Command> known = knownCommands(map);
         if (known != null) known.put(name, cmd);
         myCommands.add(name);
-    }
-
-    private boolean handleSpec(CommandSender s) {
-        if (!(s instanceof Player p)) { send(s, "Joueurs uniquement.", NamedTextColor.RED); return true; }
-        if (!isStaff(p)) { send(p, "Tu n'as pas la permission " + PERM + ".", NamedTextColor.RED); return true; }
-        p.setGameMode(GameMode.SPECTATOR);
-        send(p, "Tu es maintenant en SPECTATEUR.", NamedTextColor.GREEN);
-        return true;
     }
 
     private boolean handleSurvie(CommandSender s) {
@@ -289,8 +284,8 @@ public class StaffMode extends LoadedPlugin implements Listener {
         UUID u = p.getUniqueId();
 
         // Sauvegarde de l'inventaire normal.
-        ItemStack[] contents = p.getInventory().getContents().clone();
-        ItemStack[] armorC   = p.getInventory().getArmorContents().clone();
+        ItemStack[] contents = deepClone(p.getInventory().getContents());
+        ItemStack[] armorC   = deepClone(p.getInventory().getArmorContents());
         ItemStack off = p.getInventory().getItemInOffHand();
         off = (off == null ? new ItemStack(Material.AIR) : off.clone());
 
@@ -298,7 +293,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
         savedArmor.put(u, armorC);
         savedOff.put(u, off);
         persist();
-        // Sauvegarde de secours sur le disque (filet de securite, jamais ecrasee tant qu'on ne re-entre pas).
+        // Sauvegarde de secours sur le disque (filet de securite).
         writeBackup(p, contents, armorC, off);
 
         // On vide et on donne les items staff.
@@ -337,6 +332,8 @@ public class StaffMode extends LoadedPlugin implements Listener {
         savedInv.remove(u);
         savedArmor.remove(u);
         savedOff.remove(u);
+        pendingRestore.remove(u);
+        clearBackup(u);
         persist();
 
         p.updateInventory();
@@ -390,6 +387,16 @@ public class StaffMode extends LoadedPlugin implements Listener {
             is.setItemMeta(meta);
         }
         return is;
+    }
+
+    /** Clone profond d'un tableau d'items (le tableau ET chaque item). */
+    private ItemStack[] deepClone(ItemStack[] src) {
+        if (src == null) return null;
+        ItemStack[] out = new ItemStack[src.length];
+        for (int i = 0; i < src.length; i++) {
+            out[i] = (src[i] == null) ? null : src[i].clone();
+        }
+        return out;
     }
 
     // ===================== VANISH =====================
@@ -562,16 +569,27 @@ public class StaffMode extends LoadedPlugin implements Listener {
         Player p = e.getPlayer();
         if (pendingRestore.contains(p.getUniqueId())) restoreFromPending(p);
         // Applique la visibilite (cache les staff vanish au nouveau venu, etc.)
-        Bukkit.getScheduler(); // no-op, on rafraichit direct
         refreshVisibility();
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         Player p = e.getPlayer();
-        // Si un staff se deconnecte en mode staff, on lui rend son inventaire pour ne rien perdre.
-        if (staffMode.contains(p.getUniqueId())) exitStaff(p, true, false);
-        frozen.remove(p.getUniqueId());
+        // Si un staff se deconnecte EN mode staff : on ne restaure PAS en direct.
+        // Une modif d'inventaire dans QuitEvent n'est pas toujours ecrite par le serveur,
+        // ce qui fait perdre le stuff. On garde tout sur le disque et on le rend a la
+        // reconnexion (onJoin -> restoreFromPending), exactement comme apres un crash.
+        UUID u = p.getUniqueId();
+        if (staffMode.contains(u)) {
+            staffMode.remove(u);
+            vanished.remove(u);
+            p.setFlying(false);
+            p.setAllowFlight(false);
+            pendingRestore.add(u);   // <- restauration a la prochaine connexion
+            persist();               // <- garde savedInv / savedArmor / savedOff sur le disque
+            refreshVisibility();
+        }
+        frozen.remove(u);
     }
 
     // ===================== PERSISTANCE (secours anti-crash) =====================
@@ -594,8 +612,9 @@ public class StaffMode extends LoadedPlugin implements Listener {
         savedOff.remove(u);
         pendingRestore.remove(u);
         staffMode.remove(u);
+        clearBackup(u);
         persist();
-        send(p, "Ton inventaire a ete recupere (redemarrage staff).", NamedTextColor.YELLOW);
+        send(p, "Ton inventaire a ete recupere.", NamedTextColor.YELLOW);
     }
 
     private void writeBackup(Player p, ItemStack[] contents, ItemStack[] armor, ItemStack off) {
@@ -614,6 +633,15 @@ public class StaffMode extends LoadedPlugin implements Listener {
             cfg.save(backupFile);
         } catch (IOException e) {
             getLogger().warning("[StaffMode] backup inventaire KO : " + e.getMessage());
+        }
+    }
+
+    private void clearBackup(UUID u) {
+        if (backupFile == null || !backupFile.exists()) return;
+        YamlConfiguration cfg = YamlConfiguration.loadConfiguration(backupFile);
+        if (cfg.contains("backup." + u)) {
+            cfg.set("backup." + u, null);
+            try { cfg.save(backupFile); } catch (IOException ignored) {}
         }
     }
 
