@@ -41,7 +41,6 @@ public class ClanCommand implements CommandExecutor, TabCompleter {
         }
     }
 
-    // ==================================================================
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
@@ -85,7 +84,6 @@ public class ClanCommand implements CommandExecutor, TabCompleter {
         }
     }
 
-    // ==================================================================
     private boolean handleCreate(CommandSender sender, String[] args) {
         if (!(sender instanceof Player p)) {
             msg(sender, "&cCette commande est reservee aux joueurs.");
@@ -213,14 +211,12 @@ public class ClanCommand implements CommandExecutor, TabCompleter {
                 return true;
             }
             if (!staff) {
-                // Un joueur non-staff ne peut dissoudre que SON clan et s'il en est le chef
                 if (!(sender instanceof Player p) || !target.isLeader(p.getUniqueId())) {
                     msg(sender, "&cTu n'as pas la permission de dissoudre ce clan.");
                     return true;
                 }
             }
         } else {
-            // Sans nom : uniquement un chef dissout son propre clan
             if (!(sender instanceof Player p)) {
                 msg(sender, "&cUsage: &e/clan dissoudre <nom>");
                 return true;
@@ -250,14 +246,12 @@ public class ClanCommand implements CommandExecutor, TabCompleter {
         }
         String arg = args[1];
 
-        // 1) Est-ce un nom de clan ?
         Clan clan = manager.getClan(arg);
         if (clan != null) {
             sendClanInfo(sender, clan);
             return true;
         }
 
-        // 2) Sinon on tente comme un joueur
         UUID uuid = manager.getUUIDByName(arg);
         if (uuid == null) {
             msg(sender, "&cAucun clan ni joueur connu nomme &e" + arg + "&c.");
@@ -318,9 +312,6 @@ public class ClanCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(Text.c("&8&m--------------------------------"));
     }
 
-    // ==================================================================
-    //  Tab completion
-    // ==================================================================
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
