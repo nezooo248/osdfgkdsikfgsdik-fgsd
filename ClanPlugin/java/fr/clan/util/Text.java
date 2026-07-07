@@ -5,9 +5,6 @@ import org.bukkit.ChatColor;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Petit utilitaire pour traduire les codes couleur '&' en couleurs Minecraft.
- */
 public final class Text {
 
     private Text() {}
