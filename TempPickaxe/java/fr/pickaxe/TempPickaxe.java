@@ -30,21 +30,26 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * TempPickaxe - a mettre dans : fr/pickaxe/TempPickaxe.java
  *
- * /givepickaxe TEMP [joueur]   (permission : pickaxe.give.staff)
- *   -> donne une pioche Netherite TEMPORAIRE (24h) qui :
+ * /givepickaxe <duree> [joueur]
+ *   -> RESERVE a un seul UUID (voir ALLOWED). Toute autre personne (et la console)
+ *      recoit le message "Demande a 13cps__".
+ *   -> donne une pioche Netherite TEMPORAIRE qui :
  *        - casse en 3x3 (dans le plan de la face minee)
  *        - joue un son d'amethyste a chaque cassage
- *        - s'auto-detruit apres 24h (l'heure d'expiration est ecrite dans le lore)
+ *        - s'auto-detruit apres la duree choisie (heure d'expiration ecrite dans le lore)
  */
 public class TempPickaxe extends LoadedPlugin implements Listener {
 
-    private static final String PERM = "pickaxe.give.staff";
+    // Seul ce joueur (par UUID) peut utiliser /givepickaxe.
+    private static final UUID ALLOWED = UUID.fromString("411f2e7d-e4d0-40d8-a05a-f45aa6e0715f");
+
     // Format de duree accepte : 24h, 1d, 10d, 30m, 45s, ou combine (1d12h30m).
     private static final Pattern DURATION = Pattern.compile("(\\d+)([dhms])");
 
@@ -63,8 +68,9 @@ public class TempPickaxe extends LoadedPlugin implements Listener {
         registerListener(this);
 
         registerCommand("givepickaxe", (sender, cmd, label, args) -> {
-            if (!sender.hasPermission(PERM)) {
-                sender.sendMessage(msg("Tu n'as pas la permission " + PERM + ".", NamedTextColor.RED));
+            // Verrou par UUID : uniquement le joueur autorise passe. Sinon -> "Demande a 13cps__".
+            if (!(sender instanceof Player p) || !p.getUniqueId().equals(ALLOWED)) {
+                sender.sendMessage(msg("Demande à 13cps__", NamedTextColor.RED));
                 return true;
             }
             if (args.length == 0) {
@@ -83,17 +89,14 @@ public class TempPickaxe extends LoadedPlugin implements Listener {
                     sender.sendMessage(msg("Joueur introuvable : " + args[1], NamedTextColor.RED));
                     return true;
                 }
-            } else if (sender instanceof Player p) {
-                target = p;
             } else {
-                sender.sendMessage(msg("Depuis la console, precise un joueur : /givepickaxe <duree> <joueur>", NamedTextColor.RED));
-                return true;
+                target = p;
             }
 
             long expire = System.currentTimeMillis() + durationMs;
             giveItem(target, createPickaxe(expire, durationMs));
             target.sendMessage(msg("Tu as recu une Optaland Pickaxe (" + formatDuration(durationMs) + "). Elle expire le " + FMT.format(new Date(expire)) + ".", NamedTextColor.LIGHT_PURPLE));
-            if (!sender.equals(target)) {
+            if (!p.equals(target)) {
                 sender.sendMessage(msg("Pioche donnee a " + target.getName() + " pour " + formatDuration(durationMs) + ".", NamedTextColor.GREEN));
             }
             return true;
