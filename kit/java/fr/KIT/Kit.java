@@ -1,10 +1,11 @@
-package fr.kit;
+package fr.staffmode;
 
 import fr.loader.api.LoadedPlugin;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
+import org.bukkit.GameMode;
 import org.bukkit.Material;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandMap;
@@ -13,14 +14,14 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
-import org.bukkit.event.inventory.InventoryClickEvent;
-import org.bukkit.event.inventory.InventoryDragEvent;
-import org.bukkit.inventory.Inventory;
-import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.util.io.BukkitObjectInputStream;
 import org.bukkit.util.io.BukkitObjectOutputStream;
 
@@ -42,68 +43,111 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Systeme de kits pour Optaland.
+ * Staff mode pour Optaland + systeme de backup d'inventaire.
  *
  * Permissions :
- *   kit.kit.<nom>          -> autorise l'utilisation d'un kit precis.
- *   kit.admin              -> creation / suppression / give / reload (OP aussi autorise).
- *   kit.cooldown.bypass    -> ignore les cooldowns de kit.
+ *   staffmode.use.optaland        -> acces au mode staff.
+ *   staffmode.inventorybackup     -> acces a /inventorybackup (OP aussi autorise).
  *
  * Commandes :
- *   /kit                       -> ouvre le menu des kits.
- *   /kit <nom>                 -> recupere directement un kit (si permission).
- *   /kit create <nom> [MATERIAL] [cooldownSec]  (admin) -> cree un kit depuis TON inventaire actuel.
- *   /kit delete <nom>          (admin) -> supprime un kit.
- *   /kit give <nom> [joueur]   (admin) -> donne un kit (ignore permission + cooldown).
- *   /kit list                  -> liste les kits.
- *   /kit reload                (admin) -> recharge les fichiers.
+ *   /staff                 -> active / desactive (god + fly, inventaire mis de cote).
+ *   /staff chat <message>  -> chat staff.
+ *   /tp <joueur>           -> tp au joueur (en mode staff) sinon /tp vanilla.
+ *   /survie                -> survie.
+ *   /inventorybackup <joueur> [numero|latest|undo]  (OP) -> restaure un inventaire sauvegarde.
  *
- * Les kits (inventaire + armure + main gauche) sont serialises en base64 dans kits.yml.
- * Les cooldowns sont conserves dans kit-cooldowns.yml (survivent au redemarrage).
+ * GESTION DES ROLES (LuckPerms) :
+ *   /staff (entree) -> sauvegarde TOUS les grades du joueur, puis le passe en grade
+ *                      "joueur" (role.player-group) pour etre discret pendant le service.
+ *   /staff (sortie) -> lui remet ses vrais grades d'avant le /staff. Les grades gagnes
+ *                      pendant le service (ex: grade boutique achete) sont conserves.
+ *   Ex : tu es "admin", /staff -> tu es "joueur", /staff -> tu es "admin".
+ *
+ * BACKUP UNIVERSEL : toutes les X secondes, l'inventaire COMPLET de chaque joueur en
+ * ligne (inventaire + armure + main gauche + ender chest) est serialise en base64 et
+ * sauvegarde sur le disque, avec un historique par joueur. Un backup est aussi pris a
+ * la connexion, a la deconnexion, a la mort (items droppes) et avant chaque action
+ * destructrice (entree en staff, restauration). => on peut toujours remonter le temps.
+ *
+ * SECURITE ANTI-PERTE : on n'efface JAMAIS un inventaire tant qu'on n'a pas confirme
+ * qu'on a des donnees valides a remettre. Toutes les erreurs sont loggees (plus de
+ * catch silencieux sur les chemins critiques).
  */
-public class Kit extends LoadedPlugin implements Listener {
+public class StaffMode extends LoadedPlugin implements Listener {
 
-    static final String ADMIN_PERM      = "kit.admin";
-    static final String KIT_PERM_PREFIX = "kit.kit.";
-    static final String COOLDOWN_BYPASS = "kit.cooldown.bypass";
+    static final String PERM        = "staffmode.use.optaland";
+    static final String BACKUP_PERM = "staffmode.inventorybackup";
 
-    private static final NamedTextColor RED    = NamedTextColor.RED;
-    private static final NamedTextColor GREEN  = NamedTextColor.GREEN;
-    private static final NamedTextColor GRAY   = NamedTextColor.GRAY;
-    private static final NamedTextColor YELLOW = NamedTextColor.YELLOW;
-    private static final NamedTextColor GOLD   = NamedTextColor.GOLD;
+    private final Set<UUID> staffMode = ConcurrentHashMap.newKeySet();
 
-    private final Map<String, KitDef> kits = new ConcurrentHashMap<>();
-    private final Map<UUID, Map<String, Long>> cooldowns = new ConcurrentHashMap<>();
+    // Inventaires mis de cote pendant le mode staff (storage 36 / armor 4 / offhand 1).
+    private final Map<UUID, ItemStack[]> savedInv   = new ConcurrentHashMap<>();
+    private final Map<UUID, ItemStack[]> savedArmor = new ConcurrentHashMap<>();
+    private final Map<UUID, ItemStack>   savedOff   = new ConcurrentHashMap<>();
+    private final Set<UUID> pendingRestore = ConcurrentHashMap.newKeySet();
+
+    // Tous les groupes LuckPerms du joueur AVANT le /staff (on les remet a la sortie).
+    private final Map<UUID, List<String>> previousRoles = new ConcurrentHashMap<>();
+    private final Set<UUID> staffMembers = ConcurrentHashMap.newKeySet();
+    private boolean roleEnabled = true;
+    private String  playerGroup = "joueur"; // grade "joueur" applique pendant le mode staff (config).
+    private boolean luckPermsPresent = false;
+
+    // Backup universel.
+    private boolean backupEnabled = true;
+    private int backupIntervalSeconds = 300;
+    private int backupMaxPerPlayer = 30;
+    private File backupDir;
+    private int backupTaskId = -1;
+    private final Map<UUID, String> lastSig = new ConcurrentHashMap<>();
+    private final Object diskLock = new Object();
 
     private final Set<String> myCommands = new HashSet<>();
-    private final Object diskLock = new Object();
-    private File kitsFile;
-    private File cooldownsFile;
-
-    // ===================== CYCLE DE VIE =====================
+    private File file;
+    private File backupFile;   // backup staff (redondance) : inv-backups.yml
+    private File configFile;
 
     @Override
     public void onEnable() {
-        File dir = getHost().getDataFolder();
-        if (dir != null && !dir.exists()) dir.mkdirs();
-        this.kitsFile = new File(dir, "kits.yml");
-        this.cooldownsFile = new File(dir, "kit-cooldowns.yml");
+        this.file = new File(getHost().getDataFolder(), "staffmode.yml");
+        this.backupFile = new File(getHost().getDataFolder(), "inv-backups.yml");
+        this.configFile = new File(getHost().getDataFolder(), "configstaff.yml");
+        this.backupDir = new File(getHost().getDataFolder(), "inventory-backups");
+        if (!backupDir.exists()) backupDir.mkdirs();
 
-        loadKits();
-        loadCooldowns();
+        loadConfig();
+        this.luckPermsPresent = hasLuckPerms();
+        loadPending();
         unregisterStaleListeners();
         registerListener(this);
-        registerCommands();
+        registerStaffCommand();
         syncCommands();
 
-        getLogger().info("[Kit] active. " + kits.size() + " kit(s) charge(s).");
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            if (pendingRestore.contains(p.getUniqueId())) restoreFromPending(p);
+        }
+
+        // Tache de backup automatique + baseline immediate pour les joueurs deja connectes.
+        startBackupTask();
+        snapshotAll("startup", true, true);
+
+        getLogger().info("[StaffMode] active." + (roleEnabled && !luckPermsPresent
+                ? " (role active mais LuckPerms introuvable -> gestion de role ignoree)" : ""));
     }
 
     @Override
     public void onDisable() {
         try {
-            saveCooldowns();
+            if (backupTaskId != -1) {
+                try { Bukkit.getScheduler().cancelTask(backupTaskId); } catch (Throwable ignored) {}
+                backupTaskId = -1;
+            }
+            // Backup final (synchrone pour garantir l'ecriture avant l'arret).
+            snapshotAll("shutdown", true, false);
+
+            for (Player p : new ArrayList<>(Bukkit.getOnlinePlayers())) {
+                if (staffMode.contains(p.getUniqueId())) exitStaff(p, true, false);
+            }
             try { HandlerList.unregisterAll(this); } catch (Throwable ignored) {}
 
             CommandMap map = getCommandMap();
@@ -112,18 +156,19 @@ public class Kit extends LoadedPlugin implements Listener {
                 for (String label : myCommands) {
                     Command c = known.remove(label);
                     if (c != null) { try { c.unregister(map); } catch (Throwable ignored) {} }
-                    known.remove("kit:" + label);
+                    known.remove("staffmode:" + label);
                 }
             }
             myCommands.clear();
             syncCommands();
         } catch (Throwable t) {
-            getLogger().warning("[Kit] erreur onDisable : " + t);
+            getLogger().warning("[StaffMode] erreur onDisable : " + t);
         }
-        getLogger().info("[Kit] desactive.");
+        persist();
+        getLogger().info("[StaffMode] desactive.");
     }
 
-    /** Retire tout listener Kit fantome laisse par un /plreload precedent. */
+    /** Retire tout listener StaffMode fantome laisse par un /plreload precedent. */
     private void unregisterStaleListeners() {
         try {
             String myClass = getClass().getName();
@@ -138,7 +183,162 @@ public class Kit extends LoadedPlugin implements Listener {
         } catch (Throwable ignored) {}
     }
 
-    // ===================== ENREGISTREMENT DES COMMANDES =====================
+    // ===================== CONFIG =====================
+
+    private static final String DEFAULT_CONFIG =
+            "# ============================================\n" +
+            "#            StaffMode - Optaland\n" +
+            "# ============================================\n" +
+            "\n" +
+            "role:\n" +
+            "  # true  = /staff te passe en grade 'joueur' (discret), et te rend TES grades\n" +
+            "  #         d'origine quand tu refais /staff.\n" +
+            "  # false = le plugin ne touche jamais aux grades.\n" +
+            "  enabled: true\n" +
+            "  # Grade 'joueur' applique pendant le mode staff (pour etre discret en service).\n" +
+            "  # Mets le nom EXACT de ton groupe joueur/default LuckPerms.\n" +
+            "  # A la sortie, chaque staff retrouve ses vrais grades (peu importe lesquels),\n" +
+            "  # et garde en plus un eventuel grade achete pendant le service.\n" +
+            "  # Laisse vide (\"\") pour ne pas changer de grade (juste sauvegarder/restaurer).\n" +
+            "  player-group: \"joueur\"\n" +
+            "\n" +
+            "backup:\n" +
+            "  # Sauvegarde automatique de TOUS les inventaires sur le disque.\n" +
+            "  enabled: true\n" +
+            "  # Intervalle entre deux sauvegardes automatiques (en secondes).\n" +
+            "  interval-seconds: 300\n" +
+            "  # Nombre maximum de sauvegardes conservees par joueur.\n" +
+            "  max-per-player: 30\n";
+
+    private void loadConfig() {
+        roleEnabled = true; playerGroup = "joueur";
+        backupEnabled = true; backupIntervalSeconds = 300; backupMaxPerPlayer = 30;
+        try {
+            File dir = configFile.getParentFile();
+            if (dir != null && !dir.exists()) dir.mkdirs();
+            if (!configFile.exists()) {
+                try (java.io.FileWriter w = new java.io.FileWriter(configFile)) { w.write(DEFAULT_CONFIG); }
+                getLogger().info("[StaffMode] configstaff.yml cree.");
+            }
+            YamlConfiguration cfg = YamlConfiguration.loadConfiguration(configFile);
+            boolean changed = false;
+            if (!cfg.contains("role.enabled"))           { cfg.set("role.enabled", true); changed = true; }
+            if (!cfg.contains("role.player-group"))       { cfg.set("role.player-group", "joueur"); changed = true; }
+            if (!cfg.contains("backup.enabled"))         { cfg.set("backup.enabled", true); changed = true; }
+            if (!cfg.contains("backup.interval-seconds")) { cfg.set("backup.interval-seconds", 300); changed = true; }
+            if (!cfg.contains("backup.max-per-player"))  { cfg.set("backup.max-per-player", 30); changed = true; }
+
+            roleEnabled = cfg.getBoolean("role.enabled", true);
+            playerGroup = cfg.getString("role.player-group", "joueur");
+            backupEnabled = cfg.getBoolean("backup.enabled", true);
+            backupIntervalSeconds = Math.max(10, cfg.getInt("backup.interval-seconds", 300));
+            backupMaxPerPlayer = Math.max(3, cfg.getInt("backup.max-per-player", 30));
+
+            if (changed) cfg.save(configFile);
+        } catch (Throwable t) {
+            getLogger().warning("[StaffMode] config KO : " + t.getMessage());
+        }
+    }
+
+    // ===================== ROLE (LuckPerms) =====================
+
+    private boolean hasLuckPerms() {
+        try { return Bukkit.getPluginManager().getPlugin("LuckPerms") != null; }
+        catch (Throwable t) { return false; }
+    }
+
+    private void lpRun(String args) {
+        try {
+            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "lp " + args);
+        } catch (Throwable t) {
+            getLogger().warning("[StaffMode] commande LuckPerms KO (" + args + ") : " + t.getMessage());
+        }
+    }
+
+    /**
+     * Lit la liste COMPLETE des groupes LuckPerms directement attribues au joueur
+     * (pas seulement le "groupe principal"). Ex: [admin, default].
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> getParentGroups(Player p) {
+        try {
+            Object lp = Class.forName("net.luckperms.api.LuckPermsProvider").getMethod("get").invoke(null);
+            Object um = lp.getClass().getMethod("getUserManager").invoke(lp);
+            Object user = um.getClass().getMethod("getUser", UUID.class).invoke(um, p.getUniqueId());
+            if (user == null) return null;
+            Object nodes = user.getClass().getMethod("getNodes").invoke(user);
+            List<String> groups = new ArrayList<>();
+            for (Object node : (Iterable<Object>) nodes) {
+                Object key = node.getClass().getMethod("getKey").invoke(node);
+                if (key instanceof String k && k.startsWith("group.")) {
+                    String g = k.substring("group.".length());
+                    if (!g.isEmpty() && !groups.contains(g)) groups.add(g);
+                }
+            }
+            return groups;
+        } catch (Throwable t) {
+            getLogger().warning("[StaffMode] lecture des groupes KO pour " + p.getName() + " : " + t);
+            return null;
+        }
+    }
+
+    /**
+     * Remet au joueur ses grades d'origine (sauvegardes avant le /staff) et garde en plus
+     * les grades gagnes pendant le service (ex: grade boutique achete), sauf le grade
+     * "joueur" force par le mode staff.
+     */
+    private void restoreRealGrades(Player p, List<String> savedOriginals) {
+        if (savedOriginals == null || savedOriginals.isEmpty()) return;
+        java.util.LinkedHashSet<String> target = new java.util.LinkedHashSet<>();
+        for (String g : savedOriginals) if (g != null && !g.isEmpty()) target.add(g);
+        // On conserve les grades ajoutes pendant le service, sauf le grade "joueur" force.
+        List<String> current = getParentGroups(p);
+        if (current != null) {
+            for (String g : current) {
+                if (g != null && !g.isEmpty()
+                        && (playerGroup == null || !g.equalsIgnoreCase(playerGroup))) {
+                    target.add(g);
+                }
+            }
+        }
+        UUID u = p.getUniqueId();
+        lpRun("user " + u + " parent clear");
+        for (String g : target) lpRun("user " + u + " parent add " + g);
+    }
+
+    /** Entree en staff : on memorise TOUS les grades du joueur, puis on le passe en grade "joueur". */
+    private void applyRoleOnEnter(Player p) {
+        if (!roleEnabled || !luckPermsPresent) return;
+        List<String> groups = getParentGroups(p);
+        if (groups == null || groups.isEmpty()) {
+            // On ne connait pas les grades actuels -> on NE change RIEN (pour ne rien perdre).
+            getLogger().warning("[StaffMode] grades introuvables pour " + p.getName()
+                    + " -> grade NON change (LuckPerms pas encore charge ?).");
+            return;
+        }
+        // 1) On sauvegarde d'abord tous les grades actuels (sur le disque tout de suite).
+        previousRoles.put(p.getUniqueId(), groups);
+        persist();
+        // 2) On passe le joueur en grade "joueur" pour qu'il soit discret pendant le service.
+        if (playerGroup != null && !playerGroup.isEmpty()) {
+            lpRun("user " + p.getUniqueId() + " parent set " + playerGroup);
+        }
+    }
+
+    /** Sortie de staff : on remet ses vrais grades d'avant le /staff. Sinon on ne touche a rien. */
+    private void applyRoleOnExit(Player p) {
+        if (!roleEnabled || !luckPermsPresent) return;
+        List<String> groups = previousRoles.remove(p.getUniqueId());
+        if (groups != null && !groups.isEmpty()) {
+            restoreRealGrades(p, groups);
+        } else {
+            getLogger().info("[StaffMode] aucun grade memorise pour " + p.getName()
+                    + " -> grade laisse tel quel (rien ecrase).");
+        }
+        persist();
+    }
+
+    // ===================== ENREGISTREMENT COMMANDE =====================
 
     private CommandMap getCommandMap() {
         try {
@@ -163,16 +363,22 @@ public class Kit extends LoadedPlugin implements Listener {
         return null;
     }
 
+    private void registerStaffCommand() {
+        CommandMap map = getCommandMap();
+        if (map == null) { getLogger().warning("[StaffMode] CommandMap introuvable."); return; }
+        registerOne(map, "staff", "Mode staff", "/staff", List.of("mod", "staffmode"),
+                (s, a) -> handleCommand(s, a), (s, a) -> handleTab(s, a));
+        registerOne(map, "tp", "Teleportation staff", "/tp <joueur>", List.of(),
+                (s, a) -> handleTp(s, a), (s, a) -> tabPlayers(a));
+        registerOne(map, "survie", "Passe en survie", "/survie", List.of("survival", "surv"),
+                (s, a) -> handleSurvie(s), null);
+        registerOne(map, "inventorybackup", "Restaure un inventaire sauvegarde",
+                "/inventorybackup <joueur> [numero|latest|undo]", List.of("invbackup", "invrestore"),
+                (s, a) -> handleInventoryBackup(s, a), (s, a) -> tabBackup(a));
+    }
+
     private interface Exec { boolean run(CommandSender s, String[] a); }
     private interface Tab { List<String> run(CommandSender s, String[] a); }
-
-    private void registerCommands() {
-        CommandMap map = getCommandMap();
-        if (map == null) { getLogger().warning("[Kit] CommandMap introuvable."); return; }
-        registerOne(map, "kit", "Menu des kits",
-                "/kit [nom|create|delete|list|give|reload]", List.of("kits"),
-                (s, a) -> handleKit(s, a), (s, a) -> tabKit(s, a));
-    }
 
     private void registerOne(CommandMap map, String name, String desc, String usage,
                              List<String> aliases, Exec exec, Tab tab) {
@@ -182,10 +388,43 @@ public class Kit extends LoadedPlugin implements Listener {
                 return tab != null ? tab.run(s, a) : List.of();
             }
         };
-        map.register("kit", cmd);
+        map.register("staffmode", cmd);
         Map<String, Command> known = knownCommands(map);
         if (known != null) known.put(name, cmd);
         myCommands.add(name);
+    }
+
+    private boolean handleSurvie(CommandSender s) {
+        if (!(s instanceof Player p)) { send(s, "Joueurs uniquement.", NamedTextColor.RED); return true; }
+        if (!isStaff(p)) { send(p, "Tu n'as pas la permission " + PERM + ".", NamedTextColor.RED); return true; }
+        p.setGameMode(GameMode.SURVIVAL);
+        send(p, "Tu es maintenant en SURVIE.", NamedTextColor.GREEN);
+        return true;
+    }
+
+    private boolean handleTp(CommandSender s, String[] a) {
+        if (s instanceof Player p && isStaff(p) && staffMode.contains(p.getUniqueId()) && a.length == 1) {
+            Player target = Bukkit.getPlayerExact(a[0]);
+            if (target == null) { send(p, "Joueur introuvable : " + a[0], NamedTextColor.RED); return true; }
+            if (target.equals(p)) { send(p, "Tu ne peux pas te teleporter a toi-meme.", NamedTextColor.RED); return true; }
+            p.teleport(target.getLocation());
+            send(p, "Teleporte a " + target.getName() + ".", NamedTextColor.GREEN);
+            return true;
+        }
+        StringBuilder sb = new StringBuilder("minecraft:tp");
+        for (String arg : a) sb.append(' ').append(arg);
+        Bukkit.dispatchCommand(s, sb.toString());
+        return true;
+    }
+
+    private List<String> tabPlayers(String[] a) {
+        if (a.length != 1) return List.of();
+        String x = a[0].toLowerCase(Locale.ROOT);
+        List<String> out = new ArrayList<>();
+        for (Player o : Bukkit.getOnlinePlayers()) {
+            if (o.getName().toLowerCase(Locale.ROOT).startsWith(x)) out.add(o.getName());
+        }
+        return out;
     }
 
     private void syncCommands() {
@@ -194,359 +433,153 @@ public class Kit extends LoadedPlugin implements Listener {
         }
     }
 
-    // ===================== MESSAGES =====================
-
-    static final Component PREFIX = Component.text("Kits ", GREEN, TextDecoration.BOLD)
+    static final Component PREFIX = Component.text("Staff ", NamedTextColor.RED, TextDecoration.BOLD)
             .append(Component.text("» ", NamedTextColor.DARK_GRAY));
 
     static void send(CommandSender s, String text, NamedTextColor color) {
         s.sendMessage(PREFIX.append(Component.text(text, color)));
     }
 
-    private boolean isAdmin(CommandSender s) { return s.isOp() || s.hasPermission(ADMIN_PERM); }
-
-    private boolean noPerm(CommandSender s) {
-        send(s, "Tu n'as pas la permission (" + ADMIN_PERM + ").", RED);
-        return true;
+    boolean isStaff(CommandSender s) {
+        if (s.hasPermission(PERM)) return true;
+        if (s instanceof Player p) return staffMembers.contains(p.getUniqueId());
+        return false;
     }
 
-    // ===================== COMMANDE PRINCIPALE =====================
+    private String senderName(CommandSender s) { return (s instanceof Player pl) ? pl.getName() : "Console"; }
 
-    private boolean handleKit(CommandSender s, String[] a) {
-        if (a.length == 0) {
-            if (!(s instanceof Player p)) { send(s, "Joueurs uniquement pour ouvrir le menu.", RED); return true; }
-            if (kits.isEmpty()) { send(p, "Aucun kit n'a encore ete cree.", GRAY); return true; }
-            openMenu(p);
+    private boolean handleCommand(CommandSender sender, String[] args) {
+        if (args.length >= 1 && args[0].equalsIgnoreCase("chat")) {
+            if (!isStaff(sender)) { send(sender, "Pas la permission.", NamedTextColor.RED); return true; }
+            if (args.length < 2) { send(sender, "Usage: /staff chat <message>", NamedTextColor.RED); return true; }
+            StringBuilder sb = new StringBuilder();
+            for (int i = 1; i < args.length; i++) { if (i > 1) sb.append(' '); sb.append(args[i]); }
+            staffChat(sender, sb.toString());
             return true;
         }
-        String sub = a[0].toLowerCase(Locale.ROOT);
-        switch (sub) {
-            case "create": case "save": case "set":
-                if (!isAdmin(s)) return noPerm(s);
-                return createKit(s, a);
-            case "delete": case "remove": case "del":
-                if (!isAdmin(s)) return noPerm(s);
-                return deleteKit(s, a);
-            case "give": case "donner":
-                if (!isAdmin(s)) return noPerm(s);
-                return giveCommand(s, a);
-            case "reload": case "rl":
-                if (!isAdmin(s)) return noPerm(s);
-                loadKits(); loadCooldowns();
-                send(s, "Config rechargee (" + kits.size() + " kit(s)).", GREEN);
-                return true;
-            case "list": case "liste":
-                return listKits(s);
-            case "help": case "aide":
-                return help(s);
-            default:
-                // Nom de kit -> recuperation directe.
-                if (!(s instanceof Player p)) { send(s, "Joueurs uniquement.", RED); return true; }
-                giveKit(p, sub, false);
-                return true;
-        }
-    }
-
-    private boolean help(CommandSender s) {
-        send(s, "Commandes :", GOLD);
-        s.sendMessage(Component.text("  /kit", GOLD).append(Component.text("  ouvre le menu.", GRAY)));
-        s.sendMessage(Component.text("  /kit <nom>", GOLD).append(Component.text("  recupere un kit.", GRAY)));
-        if (isAdmin(s)) {
-            s.sendMessage(Component.text("  /kit create <nom> [MATERIAL] [cooldownSec]", GOLD)
-                    .append(Component.text("  cree depuis ton inventaire.", GRAY)));
-            s.sendMessage(Component.text("  /kit delete <nom>", GOLD).append(Component.text("  supprime.", GRAY)));
-            s.sendMessage(Component.text("  /kit give <nom> [joueur]", GOLD).append(Component.text("  donne (ignore perm/cd).", GRAY)));
-            s.sendMessage(Component.text("  /kit reload", GOLD).append(Component.text("  recharge.", GRAY)));
-        }
-        s.sendMessage(Component.text("  /kit list", GOLD).append(Component.text("  liste les kits.", GRAY)));
-        send(s, "Permission par kit : " + KIT_PERM_PREFIX + "<nom>", GRAY);
-        return true;
-    }
-
-    private boolean listKits(CommandSender s) {
-        if (kits.isEmpty()) { send(s, "Aucun kit.", GRAY); return true; }
-        send(s, "Kits (" + kits.size() + ") :", YELLOW);
-        List<KitDef> list = new ArrayList<>(kits.values());
-        list.sort(Comparator.comparing(k -> k.name));
-        for (KitDef k : list) {
-            boolean allowed = (s instanceof Player p)
-                    ? (p.hasPermission(KIT_PERM_PREFIX + k.name) || isAdmin(s)) : true;
-            Component line = Component.text("  " + k.display + " ", allowed ? GREEN : RED)
-                    .append(Component.text("(" + countItems(k) + " items", GRAY))
-                    .append(Component.text(k.cooldownSeconds > 0 ? ", cd " + human(k.cooldownSeconds * 1000L) : "", GRAY))
-                    .append(Component.text(") ", GRAY))
-                    .append(Component.text(KIT_PERM_PREFIX + k.name, NamedTextColor.DARK_GRAY));
-            s.sendMessage(line);
-        }
-        return true;
-    }
-
-    // ===================== CREATION / SUPPRESSION =====================
-
-    private boolean createKit(CommandSender s, String[] a) {
-        if (!(s instanceof Player p)) { send(s, "Joueurs uniquement (l'inventaire sert de modele).", RED); return true; }
-        if (a.length < 2) { send(s, "Usage: /kit create <nom> [MATERIAL] [cooldownSec]", GRAY); return true; }
-
-        String name = a[1].toLowerCase(Locale.ROOT);
-        if (!name.matches("[a-z0-9_-]{1,32}")) {
-            send(p, "Nom invalide. Autorise : a-z 0-9 _ - (max 32).", RED);
+        if (!(sender instanceof Player p)) { send(sender, "Joueurs uniquement (sauf /staff chat).", NamedTextColor.RED); return true; }
+        if (!isStaff(p)) { send(p, "Tu n'as pas la permission " + PERM + ".", NamedTextColor.RED); return true; }
+        if (args.length == 0) {
+            if (staffMode.contains(p.getUniqueId())) exitStaff(p, true, true);
+            else enterStaff(p);
             return true;
         }
+        send(p, "Usage: /staff  |  /staff chat <message>", NamedTextColor.GRAY);
+        return true;
+    }
 
-        KitDef kit = new KitDef();
-        kit.name = name;
-        kit.display = a[1];
-        kit.storage = deepClone(p.getInventory().getStorageContents());
-        kit.armor   = deepClone(p.getInventory().getArmorContents());
+    private void staffChat(CommandSender from, String message) {
+        String name = (from instanceof Player) ? from.getName() : "Console";
+        Component msg = Component.text("[Staff] ", NamedTextColor.DARK_RED, TextDecoration.BOLD)
+                .append(Component.text(name, NamedTextColor.RED))
+                .append(Component.text(" » ", NamedTextColor.DARK_GRAY))
+                .append(Component.text(message, NamedTextColor.GRAY));
+        for (Player o : Bukkit.getOnlinePlayers()) {
+            if (o.hasPermission(PERM)) o.sendMessage(msg);
+        }
+        Bukkit.getConsoleSender().sendMessage(msg);
+    }
+
+    private List<String> handleTab(CommandSender s, String[] a) {
+        if (a.length == 1) {
+            List<String> out = new ArrayList<>();
+            String x = a[0].toLowerCase(Locale.ROOT);
+            for (String o : List.of("chat")) if (o.startsWith(x)) out.add(o);
+            return out;
+        }
+        return List.of();
+    }
+
+    // ===================== ENTREE / SORTIE STAFF =====================
+
+    private void enterStaff(Player p) {
+        UUID u = p.getUniqueId();
+
+        // SECURITE : ne jamais ecraser une sauvegarde deja existante par un inventaire vide.
+        if (staffMode.contains(u) || savedInv.containsKey(u) || pendingRestore.contains(u)) {
+            send(p, "Un inventaire est deja sauvegarde. Fais /staff pour sortir avant de reactiver.", NamedTextColor.RED);
+            getLogger().warning("[StaffMode] enterStaff bloque pour " + p.getName() + " : sauvegarde deja existante.");
+            return;
+        }
+
+        // Backup universel juste avant de vider (double filet de securite).
+        snapshot(p, "pre-staff", true, false);
+
+        // Sauvegarde de l'inventaire normal (storage 36 / armor 4 / offhand 1).
+        ItemStack[] contents = deepClone(p.getInventory().getStorageContents());
+        ItemStack[] armorC   = deepClone(p.getInventory().getArmorContents());
         ItemStack off = p.getInventory().getItemInOffHand();
-        kit.offhand = (off == null || off.getType() == Material.AIR) ? null : off.clone();
+        off = (off == null ? new ItemStack(Material.AIR) : off.clone());
 
-        if (countItems(kit) == 0) {
-            send(p, "Ton inventaire est vide, impossible de creer un kit vide.", RED);
-            return true;
-        }
+        savedInv.put(u, contents);
+        savedArmor.put(u, armorC);
+        savedOff.put(u, off);
 
-        // Icone.
-        if (a.length >= 3) {
-            Material m = Material.matchMaterial(a[2]);
-            if (m != null && m.isItem()) kit.icon = m;
-            else send(p, "Material inconnu : " + a[2] + " -> icone automatique.", YELLOW);
-        }
-        if (kit.icon == null) kit.icon = firstMaterial(kit);
+        staffMembers.add(u);
+        applyRoleOnEnter(p);
 
-        // Cooldown (dernier argument facultatif).
-        if (a.length >= 4) {
-            try { kit.cooldownSeconds = Math.max(0, Integer.parseInt(a[3])); }
-            catch (Exception ignored) { send(p, "Cooldown invalide -> 0s.", YELLOW); }
-        } else if (kits.containsKey(name)) {
-            kit.cooldownSeconds = kits.get(name).cooldownSeconds; // on garde l'ancien cd si non precise
-            kit.slot = kits.get(name).slot;
-        }
+        persist();
+        writeBackup(u, p.getName(), contents, armorC, off);
 
-        boolean update = kits.containsKey(name);
-        kits.put(name, kit);
-        saveKits();
-        send(p, "Kit '" + name + "' " + (update ? "mis a jour" : "cree")
-                + " (" + countItems(kit) + " items). Permission : " + KIT_PERM_PREFIX + name, GREEN);
-        return true;
+        // On vide l'inventaire (mis de cote) — aucun item staff donne.
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(new ItemStack[4]);
+        p.getInventory().setItemInOffHand(null);
+
+        staffMode.add(u);
+
+        // GOD + FLY en interne.
+        p.setAllowFlight(true);
+        p.setFlying(true);
+        p.setFireTicks(0);
+
+        p.updateInventory();
+        send(p, "Mode staff ACTIVE. (god + fly)", NamedTextColor.GREEN);
     }
 
-    private boolean deleteKit(CommandSender s, String[] a) {
-        if (a.length < 2) { send(s, "Usage: /kit delete <nom>", GRAY); return true; }
-        String name = a[1].toLowerCase(Locale.ROOT);
-        if (kits.remove(name) != null) {
-            saveKits();
-            send(s, "Kit '" + name + "' supprime.", GREEN);
-        } else {
-            send(s, "Kit inconnu : " + a[1], RED);
-        }
-        return true;
+    private void exitStaff(Player p, boolean restore, boolean announce) {
+        UUID u = p.getUniqueId();
+        staffMode.remove(u);
+
+        p.setFlying(false);
+        p.setAllowFlight(false);
+
+        if (restore) restoreInventory(p);
+
+        applyRoleOnExit(p);
+
+        savedInv.remove(u);
+        savedArmor.remove(u);
+        savedOff.remove(u);
+        pendingRestore.remove(u);
+        clearBackup(u);
+        persist();
+
+        p.updateInventory();
+        if (announce) send(p, "Mode staff DESACTIVE.", NamedTextColor.GRAY);
     }
 
-    private boolean giveCommand(CommandSender s, String[] a) {
-        if (a.length < 2) { send(s, "Usage: /kit give <nom> [joueur]", GRAY); return true; }
-        String name = a[1].toLowerCase(Locale.ROOT);
-        KitDef kit = kits.get(name);
-        if (kit == null) { send(s, "Kit inconnu : " + a[1], RED); return true; }
-
-        Player target;
-        if (a.length >= 3) {
-            target = Bukkit.getPlayerExact(a[2]);
-            if (target == null) { send(s, "Joueur introuvable : " + a[2], RED); return true; }
-        } else if (s instanceof Player p) {
-            target = p;
-        } else {
-            send(s, "Precise un joueur depuis la console.", RED);
-            return true;
+    /** Restaure l'inventaire mis de cote. NE TOUCHE PAS a l'inventaire si aucune donnee valide. */
+    private void restoreInventory(Player p) {
+        UUID u = p.getUniqueId();
+        ItemStack[] inv = savedInv.get(u), armor = savedArmor.get(u);
+        ItemStack off = savedOff.get(u);
+        boolean hasData = (inv != null && !allNull(inv))
+                       || (armor != null && !allNull(armor))
+                       || (off != null && off.getType() != Material.AIR);
+        if (!hasData) {
+            getLogger().warning("[StaffMode] rien a restaurer pour " + p.getName()
+                    + " (sauvegarde vide/introuvable, inventaire actuel laisse INTACT).");
+            return;
         }
-
-        applyKit(target, kit);
-        send(s, "Kit '" + name + "' donne a " + target.getName() + ".", GREEN);
-        if (!target.equals(s)) send(target, "Tu as recu le kit '" + name + "'.", GREEN);
-        return true;
-    }
-
-    // ===================== RECUPERATION D'UN KIT =====================
-
-    private void giveKit(Player p, String name, boolean bypass) {
-        KitDef kit = kits.get(name.toLowerCase(Locale.ROOT));
-        if (kit == null) { send(p, "Kit inconnu : " + name, RED); return; }
-
-        if (!bypass) {
-            boolean allowed = p.hasPermission(KIT_PERM_PREFIX + kit.name) || isAdmin(p);
-            if (!allowed) { send(p, "Tu n'as pas la permission pour le kit '" + kit.name + "'.", RED); return; }
-
-            long rem = cooldownRemainingMillis(p, kit);
-            if (rem > 0 && !p.hasPermission(COOLDOWN_BYPASS)) {
-                send(p, "Kit '" + kit.name + "' disponible dans " + human(rem) + ".", YELLOW);
-                return;
-            }
-        }
-
-        applyKit(p, kit);
-        if (!bypass && kit.cooldownSeconds > 0 && !p.hasPermission(COOLDOWN_BYPASS)) setCooldown(p, kit);
-        send(p, "Tu as recu le kit '" + kit.name + "'.", GREEN);
-    }
-
-    /** Donne les items du kit : storage/offhand par addItem, armure equipee si le slot est libre. */
-    private void applyKit(Player p, KitDef kit) {
-        if (kit.storage != null) {
-            for (ItemStack it : kit.storage) {
-                if (it != null && it.getType() != Material.AIR) {
-                    for (ItemStack left : p.getInventory().addItem(it.clone()).values())
-                        p.getWorld().dropItemNaturally(p.getLocation(), left);
-                }
-            }
-        }
-        if (kit.armor != null) {
-            ItemStack[] cur = p.getInventory().getArmorContents(); // [bottes, jambieres, plastron, casque]
-            for (int i = 0; i < 4 && i < kit.armor.length; i++) {
-                ItemStack piece = kit.armor[i];
-                if (piece == null || piece.getType() == Material.AIR) continue;
-                if (cur[i] == null || cur[i].getType() == Material.AIR) {
-                    cur[i] = piece.clone();
-                } else {
-                    for (ItemStack left : p.getInventory().addItem(piece.clone()).values())
-                        p.getWorld().dropItemNaturally(p.getLocation(), left);
-                }
-            }
-            p.getInventory().setArmorContents(cur);
-        }
-        if (kit.offhand != null && kit.offhand.getType() != Material.AIR) {
-            ItemStack curOff = p.getInventory().getItemInOffHand();
-            if (curOff == null || curOff.getType() == Material.AIR) {
-                p.getInventory().setItemInOffHand(kit.offhand.clone());
-            } else {
-                for (ItemStack left : p.getInventory().addItem(kit.offhand.clone()).values())
-                    p.getWorld().dropItemNaturally(p.getLocation(), left);
-            }
-        }
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(new ItemStack[4]);
+        p.getInventory().setItemInOffHand(null);
+        if (inv != null) applyStorage(p, inv);
+        if (armor != null) p.getInventory().setArmorContents(fit4(armor));
+        if (off != null) p.getInventory().setItemInOffHand(off);
         p.updateInventory();
     }
-
-    // ===================== COOLDOWNS =====================
-
-    private long cooldownRemainingMillis(Player p, KitDef kit) {
-        if (kit.cooldownSeconds <= 0) return 0;
-        Map<String, Long> m = cooldowns.get(p.getUniqueId());
-        if (m == null) return 0;
-        Long last = m.get(kit.name);
-        if (last == null) return 0;
-        long end = last + kit.cooldownSeconds * 1000L;
-        return Math.max(0, end - System.currentTimeMillis());
-    }
-
-    private void setCooldown(Player p, KitDef kit) {
-        cooldowns.computeIfAbsent(p.getUniqueId(), k -> new ConcurrentHashMap<>())
-                 .put(kit.name, System.currentTimeMillis());
-        saveCooldowns();
-    }
-
-    // ===================== MENU (GUI) =====================
-
-    static final Component MENU_TITLE = Component.text("Kits", NamedTextColor.DARK_GREEN, TextDecoration.BOLD);
-
-    static final class KitMenuHolder implements InventoryHolder {
-        final Map<Integer, String> slotToKit = new java.util.HashMap<>();
-        Inventory inv;
-        @Override public Inventory getInventory() { return inv; }
-    }
-
-    private void openMenu(Player p) {
-        List<KitDef> list = new ArrayList<>(kits.values());
-        list.sort(Comparator
-                .comparingInt((KitDef k) -> k.slot < 0 ? Integer.MAX_VALUE : k.slot)
-                .thenComparing(k -> k.name));
-
-        int maxSlot = 0;
-        for (KitDef k : list) if (k.slot >= 0) maxSlot = Math.max(maxSlot, k.slot + 1);
-        int count = Math.max(list.size(), maxSlot);
-        int rows = Math.min(6, Math.max(1, (int) Math.ceil(count / 9.0)));
-        int size = rows * 9;
-
-        KitMenuHolder holder = new KitMenuHolder();
-        Inventory inv = Bukkit.createInventory(holder, size, MENU_TITLE);
-        holder.inv = inv;
-
-        Set<Integer> used = new HashSet<>();
-        List<KitDef> auto = new ArrayList<>();
-        for (KitDef k : list) {
-            if (k.slot >= 0 && k.slot < size && !used.contains(k.slot)) {
-                inv.setItem(k.slot, buildIcon(p, k));
-                holder.slotToKit.put(k.slot, k.name);
-                used.add(k.slot);
-            } else {
-                auto.add(k);
-            }
-        }
-        int idx = 0;
-        for (KitDef k : auto) {
-            while (idx < size && used.contains(idx)) idx++;
-            if (idx >= size) break;
-            inv.setItem(idx, buildIcon(p, k));
-            holder.slotToKit.put(idx, k.name);
-            used.add(idx);
-            idx++;
-        }
-
-        p.openInventory(inv);
-    }
-
-    private ItemStack buildIcon(Player p, KitDef kit) {
-        boolean allowed = p.hasPermission(KIT_PERM_PREFIX + kit.name) || isAdmin(p);
-        Material mat = allowed ? (kit.icon != null ? kit.icon : Material.CHEST) : Material.BARRIER;
-        ItemStack item = new ItemStack(mat);
-        ItemMeta meta = item.getItemMeta();
-        if (meta != null) {
-            meta.displayName(Component.text(kit.display, allowed ? GREEN : RED, TextDecoration.BOLD)
-                    .decoration(TextDecoration.ITALIC, false));
-
-            List<Component> lore = new ArrayList<>();
-            lore.add(Component.text(countItems(kit) + " item(s)", GRAY).decoration(TextDecoration.ITALIC, false));
-            if (kit.cooldownSeconds > 0)
-                lore.add(Component.text("Cooldown : " + human(kit.cooldownSeconds * 1000L), NamedTextColor.DARK_GRAY)
-                        .decoration(TextDecoration.ITALIC, false));
-            lore.add(Component.empty());
-
-            if (!allowed) {
-                lore.add(Component.text("Tu n'as pas acces a ce kit.", RED).decoration(TextDecoration.ITALIC, false));
-                lore.add(Component.text("(" + KIT_PERM_PREFIX + kit.name + ")", NamedTextColor.DARK_GRAY)
-                        .decoration(TextDecoration.ITALIC, false));
-            } else {
-                long rem = cooldownRemainingMillis(p, kit);
-                if (rem > 0 && !p.hasPermission(COOLDOWN_BYPASS))
-                    lore.add(Component.text("Disponible dans " + human(rem), YELLOW).decoration(TextDecoration.ITALIC, false));
-                else
-                    lore.add(Component.text("Clique pour recuperer ce kit.", YELLOW).decoration(TextDecoration.ITALIC, false));
-            }
-            meta.lore(lore);
-            item.setItemMeta(meta);
-        }
-        return item;
-    }
-
-    @EventHandler
-    public void onClick(InventoryClickEvent e) {
-        Inventory top = e.getView().getTopInventory();
-        if (!(top.getHolder() instanceof KitMenuHolder holder)) return;
-        e.setCancelled(true); // menu en lecture seule
-        if (!(e.getWhoClicked() instanceof Player p)) return;
-
-        int raw = e.getRawSlot();
-        if (raw < 0 || raw >= top.getSize()) return; // clic dans l'inventaire du joueur
-        String kitName = holder.slotToKit.get(raw);
-        if (kitName == null) return;
-
-        p.closeInventory();
-        giveKit(p, kitName, false);
-    }
-
-    @EventHandler
-    public void onDrag(InventoryDragEvent e) {
-        if (e.getView().getTopInventory().getHolder() instanceof KitMenuHolder) e.setCancelled(true);
-    }
-
-    // ===================== OUTILS ITEMS =====================
 
     private ItemStack[] deepClone(ItemStack[] src) {
         if (src == null) return null;
@@ -555,9 +588,332 @@ public class Kit extends LoadedPlugin implements Listener {
         return out;
     }
 
-    private int countItems(KitDef k) {
-        int c = countNonNull(k.storage) + countNonNull(k.armor);
-        if (k.offhand != null && k.offhand.getType() != Material.AIR) c++;
+    private boolean allNull(ItemStack[] arr) {
+        if (arr == null) return true;
+        for (ItemStack it : arr) if (it != null && it.getType() != Material.AIR) return false;
+        return true;
+    }
+
+    private ItemStack[] fit4(ItemStack[] armor) {
+        ItemStack[] a = new ItemStack[4];
+        for (int i = 0; i < 4 && i < armor.length; i++) a[i] = armor[i];
+        return a;
+    }
+
+    /** Applique un tableau de storage : taille 36 = pose directe, sinon addItem (ex: drops de mort). */
+    private void applyStorage(Player p, ItemStack[] storage) {
+        if (storage.length == 36) { p.getInventory().setStorageContents(storage); return; }
+        for (ItemStack it : storage) {
+            if (it != null && it.getType() != Material.AIR) {
+                for (ItemStack leftover : p.getInventory().addItem(it.clone()).values()) {
+                    p.getWorld().dropItemNaturally(p.getLocation(), leftover);
+                }
+            }
+        }
+    }
+
+    // ===================== GOD =====================
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDamage(EntityDamageEvent e) {
+        if (e.getEntity() instanceof Player p && staffMode.contains(p.getUniqueId())) {
+            e.setCancelled(true);
+        }
+    }
+
+    // ===================== JOIN / QUIT / DEATH =====================
+
+    @EventHandler
+    public void onJoin(PlayerJoinEvent e) {
+        Player p = e.getPlayer();
+        if (pendingRestore.contains(p.getUniqueId())) restoreFromPending(p);
+        snapshot(p, "join", true, true);
+    }
+
+    @EventHandler
+    public void onQuit(PlayerQuitEvent e) {
+        Player p = e.getPlayer();
+        UUID u = p.getUniqueId();
+        if (staffMode.contains(u)) {
+            // On ne restaure PAS l'inventaire en direct : on garde tout sur disque et on
+            // le rend a la reconnexion (comme apres un crash).
+            staffMode.remove(u);
+            p.setFlying(false);
+            p.setAllowFlight(false);
+            applyRoleOnExit(p);
+            pendingRestore.add(u);
+            persist();
+        } else {
+            // Backup de securite avant deconnexion (synchrone).
+            snapshot(p, "quit", true, false);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onDeath(PlayerDeathEvent e) {
+        Player p = e.getEntity();
+        List<ItemStack> drops = e.getDrops();
+        // On sauvegarde ce qui est perdu a la mort pour pouvoir le rendre plus tard.
+        if (drops != null && !drops.isEmpty()) {
+            List<ItemStack> copy = new ArrayList<>();
+            for (ItemStack it : drops) copy.add(it == null ? null : it.clone());
+            snapshotArrays(p.getUniqueId(), p.getName(), p.getGameMode().name(), p.getLevel(), "death",
+                    copy.toArray(new ItemStack[0]), new ItemStack[0], new ItemStack[0],
+                    p.getEnderChest().getContents(), true, true);
+        } else {
+            snapshot(p, "death", true, true);
+        }
+    }
+
+    // ===================== BACKUP UNIVERSEL =====================
+
+    private void startBackupTask() {
+        if (!backupEnabled) return;
+        if (getHost() instanceof org.bukkit.plugin.Plugin plugin) {
+            long ticks = Math.max(200L, backupIntervalSeconds * 20L);
+            try {
+                backupTaskId = Bukkit.getScheduler()
+                        .runTaskTimer(plugin, () -> snapshotAll("auto", false, true), ticks, ticks)
+                        .getTaskId();
+            } catch (Throwable t) {
+                getLogger().warning("[StaffMode] impossible de lancer la tache de backup : " + t);
+            }
+        } else {
+            getLogger().warning("[StaffMode] getHost() n'est pas un Plugin -> backup automatique desactive.");
+        }
+    }
+
+    private void snapshotAll(String reason, boolean force, boolean async) {
+        for (Player p : Bukkit.getOnlinePlayers()) snapshot(p, reason, force, async);
+    }
+
+    private void snapshot(Player p, String reason, boolean force, boolean async) {
+        snapshotArrays(p.getUniqueId(), p.getName(), p.getGameMode().name(), p.getLevel(), reason,
+                p.getInventory().getStorageContents(), p.getInventory().getArmorContents(),
+                new ItemStack[]{ p.getInventory().getItemInOffHand() }, p.getEnderChest().getContents(),
+                force, async);
+    }
+
+    private void snapshotArrays(UUID u, String name, String gm, int level, String reason,
+                                ItemStack[] storage, ItemStack[] armor, ItemStack[] offArr, ItemStack[] ender,
+                                boolean force, boolean async) {
+        if (!backupEnabled && !force) return;
+        String sStorage, sArmor, sOff, sEnder;
+        try {
+            sStorage = toBase64(storage == null ? new ItemStack[0] : storage);
+            sArmor   = toBase64(armor   == null ? new ItemStack[0] : armor);
+            sOff     = toBase64(offArr  == null ? new ItemStack[0] : offArr);
+            sEnder   = toBase64(ender   == null ? new ItemStack[0] : ender);
+        } catch (Throwable t) {
+            getLogger().warning("[StaffMode] snapshot serialisation KO pour " + name + " : " + t);
+            return;
+        }
+        String sig = Integer.toHexString((sStorage + "|" + sArmor + "|" + sOff + "|" + sEnder).hashCode());
+        if (!force && sig.equals(lastSig.get(u))) return; // rien de change depuis le dernier
+        lastSig.put(u, sig);
+
+        long time = System.currentTimeMillis();
+        Runnable write = () -> writeSnapshot(u, name, time, reason, gm, level, sStorage, sArmor, sOff, sEnder);
+        if (async && getHost() instanceof org.bukkit.plugin.Plugin plugin) {
+            try { Bukkit.getScheduler().runTaskAsynchronously(plugin, write); return; } catch (Throwable ignored) {}
+        }
+        write.run();
+    }
+
+    private File backupFileFor(UUID u) { return new File(backupDir, u.toString() + ".yml"); }
+
+    private void writeSnapshot(UUID u, String name, long time, String reason, String gm, int level,
+                               String storage, String armor, String off, String ender) {
+        synchronized (diskLock) {
+            try {
+                if (backupDir != null && !backupDir.exists()) backupDir.mkdirs();
+                File f = backupFileFor(u);
+                YamlConfiguration cfg = f.exists() ? YamlConfiguration.loadConfiguration(f) : new YamlConfiguration();
+
+                String id = String.format(Locale.ROOT, "%020d", time);
+                while (cfg.contains("snapshots." + id)) id = String.format(Locale.ROOT, "%020d", ++time);
+
+                String base = "snapshots." + id;
+                cfg.set(base + ".time", time);
+                cfg.set(base + ".reason", reason);
+                cfg.set(base + ".name", name);
+                cfg.set(base + ".gamemode", gm);
+                cfg.set(base + ".level", level);
+                cfg.set(base + ".storage", storage);
+                cfg.set(base + ".armor", armor);
+                cfg.set(base + ".offhand", off);
+                cfg.set(base + ".enderchest", ender);
+
+                // On limite l'historique.
+                ConfigurationSection sec = cfg.getConfigurationSection("snapshots");
+                if (sec != null) {
+                    List<String> keys = new ArrayList<>(sec.getKeys(false));
+                    if (keys.size() > backupMaxPerPlayer) {
+                        keys.sort(Comparator.naturalOrder()); // ids = temps zero-paddes => chronologique
+                        int remove = keys.size() - backupMaxPerPlayer;
+                        for (int i = 0; i < remove; i++) cfg.set("snapshots." + keys.get(i), null);
+                    }
+                }
+
+                cfg.set("lastName", name);
+                cfg.set("uuid", u.toString());
+                cfg.save(f);
+            } catch (Throwable t) {
+                getLogger().warning("[StaffMode] ecriture backup KO pour " + name + " : " + t);
+            }
+        }
+    }
+
+    private static final class Snapshot {
+        String id, reason, name, gamemode;
+        long time;
+        int level;
+        String storage, armor, offhand, ender;
+    }
+
+    private List<Snapshot> readSnapshots(UUID u) {
+        List<Snapshot> out = new ArrayList<>();
+        File f = backupFileFor(u);
+        if (!f.exists()) return out;
+        YamlConfiguration cfg;
+        synchronized (diskLock) { cfg = YamlConfiguration.loadConfiguration(f); }
+        ConfigurationSection sec = cfg.getConfigurationSection("snapshots");
+        if (sec == null) return out;
+        for (String id : sec.getKeys(false)) {
+            String b = "snapshots." + id;
+            Snapshot s = new Snapshot();
+            s.id = id;
+            s.time = cfg.getLong(b + ".time");
+            s.reason = cfg.getString(b + ".reason", "?");
+            s.name = cfg.getString(b + ".name", "?");
+            s.gamemode = cfg.getString(b + ".gamemode", "?");
+            s.level = cfg.getInt(b + ".level", 0);
+            s.storage = cfg.getString(b + ".storage");
+            s.armor = cfg.getString(b + ".armor");
+            s.offhand = cfg.getString(b + ".offhand");
+            s.ender = cfg.getString(b + ".enderchest");
+            out.add(s);
+        }
+        out.sort((a, bb) -> Long.compare(bb.time, a.time)); // plus recent d'abord
+        return out;
+    }
+
+    private UUID resolveUuid(String target) {
+        Player on = Bukkit.getPlayerExact(target);
+        if (on != null) return on.getUniqueId();
+        try { UUID u = UUID.fromString(target); if (backupFileFor(u).exists()) return u; } catch (Exception ignored) {}
+        if (backupDir != null && backupDir.isDirectory()) {
+            File[] files = backupDir.listFiles((d, n) -> n.endsWith(".yml"));
+            if (files != null) {
+                synchronized (diskLock) {
+                    for (File f : files) {
+                        try {
+                            YamlConfiguration c = YamlConfiguration.loadConfiguration(f);
+                            String nm = c.getString("lastName");
+                            if (nm != null && nm.equalsIgnoreCase(target)) {
+                                String base = f.getName().substring(0, f.getName().length() - 4);
+                                return UUID.fromString(base);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean handleInventoryBackup(CommandSender s, String[] a) {
+        if (!(s.isOp() || s.hasPermission(BACKUP_PERM))) {
+            send(s, "Commande reservee aux OP.", NamedTextColor.RED);
+            return true;
+        }
+        if (a.length == 0) {
+            send(s, "Usage: /inventorybackup <joueur> [numero|latest|undo]", NamedTextColor.GRAY);
+            return true;
+        }
+        String target = a[0];
+        UUID u = resolveUuid(target);
+        if (u == null) { send(s, "Aucun joueur / backup trouve pour : " + target, NamedTextColor.RED); return true; }
+
+        List<Snapshot> snaps = readSnapshots(u);
+        if (snaps.isEmpty()) { send(s, "Aucun backup enregistre pour " + target + ".", NamedTextColor.RED); return true; }
+
+        // Liste.
+        if (a.length == 1) {
+            send(s, "Backups de " + target + " (" + snaps.size() + ") — du plus recent au plus ancien :", NamedTextColor.YELLOW);
+            int i = 1;
+            for (Snapshot snap : snaps) {
+                if (i > 15) {
+                    s.sendMessage(Component.text("  ... " + (snaps.size() - 15) + " de plus.", NamedTextColor.DARK_GRAY));
+                    break;
+                }
+                s.sendMessage(Component.text("  #" + i + " ", NamedTextColor.GOLD)
+                        .append(Component.text(ago(snap.time), NamedTextColor.GRAY))
+                        .append(Component.text("  [" + snap.reason + "] ", NamedTextColor.DARK_GRAY))
+                        .append(Component.text(countItems(snap) + " items", NamedTextColor.AQUA)));
+                i++;
+            }
+            send(s, "Restaurer : /inventorybackup " + target + " <numero>   (ou latest / undo)", NamedTextColor.GRAY);
+            return true;
+        }
+
+        // Restauration -> le joueur doit etre en ligne.
+        Player p = Bukkit.getPlayer(u);
+        if (p == null) { send(s, "Le joueur doit etre connecte pour restaurer son inventaire.", NamedTextColor.RED); return true; }
+
+        String arg = a[1].toLowerCase(Locale.ROOT);
+        Snapshot chosen;
+        if (arg.equals("latest")) {
+            chosen = snaps.get(0);
+        } else if (arg.equals("undo")) {
+            chosen = null;
+            for (Snapshot snap : snaps) { if ("pre-restore".equals(snap.reason)) { chosen = snap; break; } }
+            if (chosen == null) { send(s, "Aucun point d'annulation (pre-restore) trouve.", NamedTextColor.RED); return true; }
+        } else {
+            int idx;
+            try { idx = Integer.parseInt(arg); } catch (Exception ex) { send(s, "Numero invalide : " + a[1], NamedTextColor.RED); return true; }
+            if (idx < 1 || idx > snaps.size()) { send(s, "Numero hors limites (1-" + snaps.size() + ").", NamedTextColor.RED); return true; }
+            chosen = snaps.get(idx - 1);
+        }
+
+        // Point d'annulation : on sauvegarde l'inventaire actuel AVANT d'ecraser.
+        snapshot(p, "pre-restore", true, false);
+
+        try {
+            restoreSnapshotToPlayer(p, chosen);
+            send(s, "Inventaire de " + p.getName() + " restaure (" + ago(chosen.time) + ", [" + chosen.reason + "]).", NamedTextColor.GREEN);
+            send(p, "Un OP a restaure ton inventaire (sauvegarde " + ago(chosen.time) + ").", NamedTextColor.YELLOW);
+            getLogger().info("[StaffMode] " + senderName(s) + " a restaure l'inventaire de " + p.getName()
+                    + " (snapshot " + chosen.id + ", reason=" + chosen.reason + ").");
+        } catch (Throwable t) {
+            send(s, "Echec de la restauration : " + t.getMessage(), NamedTextColor.RED);
+            getLogger().warning("[StaffMode] restauration KO pour " + p.getName() + " : " + t);
+        }
+        return true;
+    }
+
+    private void restoreSnapshotToPlayer(Player p, Snapshot s) throws Exception {
+        ItemStack[] storage = s.storage != null ? fromBase64(s.storage) : new ItemStack[0];
+        ItemStack[] armor   = s.armor   != null ? fromBase64(s.armor)   : new ItemStack[0];
+        ItemStack[] off     = s.offhand != null ? fromBase64(s.offhand) : new ItemStack[0];
+        ItemStack[] ender   = s.ender   != null ? fromBase64(s.ender)   : null;
+
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(new ItemStack[4]);
+        p.getInventory().setItemInOffHand(null);
+
+        applyStorage(p, storage);
+        p.getInventory().setArmorContents(fit4(armor));
+        p.getInventory().setItemInOffHand(off.length > 0 ? off[0] : null);
+        if (ender != null) { try { p.getEnderChest().setContents(ender); } catch (Throwable ignored) {} }
+        p.updateInventory();
+    }
+
+    private int countItems(Snapshot s) {
+        int c = 0;
+        c += countNonNull(fromBase64Safe(s.storage));
+        c += countNonNull(fromBase64Safe(s.armor));
+        c += countNonNull(fromBase64Safe(s.offhand));
         return c;
     }
 
@@ -568,59 +924,27 @@ public class Kit extends LoadedPlugin implements Listener {
         return c;
     }
 
-    private Material firstMaterial(KitDef k) {
-        if (k.storage != null) for (ItemStack it : k.storage) if (it != null && it.getType() != Material.AIR) return it.getType();
-        if (k.armor != null)   for (ItemStack it : k.armor)   if (it != null && it.getType() != Material.AIR) return it.getType();
-        if (k.offhand != null && k.offhand.getType() != Material.AIR) return k.offhand.getType();
-        return Material.CHEST;
+    private String ago(long time) {
+        long d = Math.max(0, System.currentTimeMillis() - time);
+        long sec = d / 1000, min = sec / 60, h = min / 60, day = h / 24;
+        if (day > 0) return "il y a " + day + "j " + (h % 24) + "h";
+        if (h > 0)   return "il y a " + h + "h " + (min % 60) + "m";
+        if (min > 0) return "il y a " + min + "m";
+        return "il y a " + sec + "s";
     }
 
-    private String human(long ms) {
-        long s = Math.max(0, (ms + 999) / 1000);
-        long h = s / 3600, m = (s % 3600) / 60, sec = s % 60;
-        if (h > 0) return h + "h " + m + "m";
-        if (m > 0) return m + "m " + sec + "s";
-        return sec + "s";
-    }
-
-    // ===================== TAB COMPLETION =====================
-
-    private List<String> tabKit(CommandSender s, String[] a) {
-        if (a.length == 1) {
-            List<String> opts = new ArrayList<>(kits.keySet());
-            if (isAdmin(s)) opts.addAll(List.of("create", "delete", "give", "list", "reload", "help"));
-            return filter(opts, a[0]);
-        }
+    private List<String> tabBackup(String[] a) {
+        if (a.length == 1) return tabPlayers(a);
         if (a.length == 2) {
-            String sub = a[0].toLowerCase(Locale.ROOT);
-            if (sub.equals("delete") || sub.equals("remove") || sub.equals("del") || sub.equals("give"))
-                return filter(new ArrayList<>(kits.keySet()), a[1]);
-        }
-        if (a.length == 3) {
-            String sub = a[0].toLowerCase(Locale.ROOT);
-            if (sub.equals("give")) return tabPlayers(a[2]);
-            if (sub.equals("create") || sub.equals("save") || sub.equals("set"))
-                return filter(List.of("DIAMOND_SWORD", "IRON_SWORD", "BOW", "CHEST", "GOLDEN_APPLE", "COOKED_BEEF"), a[2]);
+            List<String> base = new ArrayList<>(List.of("latest", "undo", "1", "2", "3", "5", "10"));
+            String x = a[1].toLowerCase(Locale.ROOT);
+            base.removeIf(o -> !o.startsWith(x));
+            return base;
         }
         return List.of();
     }
 
-    private List<String> tabPlayers(String prefix) {
-        String x = prefix.toLowerCase(Locale.ROOT);
-        List<String> out = new ArrayList<>();
-        for (Player o : Bukkit.getOnlinePlayers())
-            if (o.getName().toLowerCase(Locale.ROOT).startsWith(x)) out.add(o.getName());
-        return out;
-    }
-
-    private List<String> filter(List<String> src, String prefix) {
-        String x = prefix.toLowerCase(Locale.ROOT);
-        List<String> out = new ArrayList<>();
-        for (String o : src) if (o.toLowerCase(Locale.ROOT).startsWith(x)) out.add(o);
-        return out;
-    }
-
-    // ===================== SERIALISATION (base64) =====================
+    // ===================== SERIALISATION (base64 robuste) =====================
 
     private String toBase64(ItemStack[] items) throws IOException {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -644,116 +968,178 @@ public class Kit extends LoadedPlugin implements Listener {
     private ItemStack[] fromBase64Safe(String data) {
         if (data == null) return null;
         try { return fromBase64(data); }
-        catch (Throwable t) { getLogger().warning("[Kit] lecture item KO : " + t); return null; }
+        catch (Throwable t) { getLogger().warning("[StaffMode] lecture backup KO : " + t); return null; }
     }
 
     private String toBase64Safe(ItemStack[] arr) {
         try { return toBase64(arr == null ? new ItemStack[0] : arr); }
-        catch (Throwable t) { getLogger().warning("[Kit] serialisation KO : " + t); return null; }
+        catch (Throwable t) { getLogger().warning("[StaffMode] serialisation KO : " + t); return null; }
     }
 
-    // ===================== PERSISTANCE =====================
+    // ===================== PERSISTANCE (staff : pending + roles) =====================
 
-    private static final class KitDef {
-        String name;
-        String display;
-        Material icon;
-        int cooldownSeconds = 0;
-        int slot = -1;
-        ItemStack[] storage;
-        ItemStack[] armor;
-        ItemStack offhand;
-    }
+    private void restoreFromPending(Player p) {
+        UUID u = p.getUniqueId();
 
-    private void loadKits() {
-        kits.clear();
-        if (kitsFile == null || !kitsFile.exists()) return;
-        YamlConfiguration cfg;
-        synchronized (diskLock) { cfg = YamlConfiguration.loadConfiguration(kitsFile); }
-        ConfigurationSection sec = cfg.getConfigurationSection("kits");
-        if (sec == null) return;
-        for (String key : sec.getKeys(false)) {
-            try {
-                String base = "kits." + key;
-                KitDef k = new KitDef();
-                k.name = key.toLowerCase(Locale.ROOT);
-                k.display = cfg.getString(base + ".display", key);
-                Material m = Material.matchMaterial(cfg.getString(base + ".icon", "CHEST"));
-                k.icon = (m != null) ? m : Material.CHEST;
-                k.cooldownSeconds = Math.max(0, cfg.getInt(base + ".cooldown", 0));
-                k.slot = cfg.getInt(base + ".slot", -1);
-                k.storage = fromBase64Safe(cfg.getString(base + ".storage"));
-                k.armor   = fromBase64Safe(cfg.getString(base + ".armor"));
-                ItemStack[] off = fromBase64Safe(cfg.getString(base + ".offhand"));
-                k.offhand = (off != null && off.length > 0 && off[0] != null
-                        && off[0].getType() != Material.AIR) ? off[0] : null;
-                kits.put(k.name, k);
-            } catch (Throwable t) {
-                getLogger().warning("[Kit] kit illisible '" + key + "' : " + t);
-            }
+        // Si des groupes avaient ete memorises mais pas encore remis (ex: crash pendant le
+        // mode staff), on les remet ici a la reconnexion.
+        if (roleEnabled && luckPermsPresent) {
+            List<String> prevGroups = previousRoles.remove(u);
+            if (prevGroups != null && !prevGroups.isEmpty()) restoreRealGrades(p, prevGroups);
         }
+
+        ItemStack[] inv = savedInv.get(u), armor = savedArmor.get(u);
+        ItemStack off = savedOff.get(u);
+
+        boolean hasData = (inv != null && !allNull(inv))
+                       || (armor != null && !allNull(armor))
+                       || (off != null && off.getType() != Material.AIR);
+
+        if (!hasData) {
+            // Aucune donnee valide -> on NE TOUCHE PAS a l'inventaire reel du joueur.
+            pendingRestore.remove(u);
+            staffMode.remove(u);
+            savedInv.remove(u); savedArmor.remove(u); savedOff.remove(u);
+            getLogger().warning("[StaffMode] restauration ignoree pour " + p.getName()
+                    + " : aucune donnee valide (inventaire actuel laisse INTACT). "
+                    + "Utilise /inventorybackup " + p.getName() + " pour recuperer une sauvegarde.");
+            persist();
+            return;
+        }
+
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(new ItemStack[4]);
+        p.getInventory().setItemInOffHand(null);
+        if (inv != null) applyStorage(p, inv);
+        if (armor != null) p.getInventory().setArmorContents(fit4(armor));
+        if (off != null) p.getInventory().setItemInOffHand(off);
+        p.updateInventory();
+
+        savedInv.remove(u);
+        savedArmor.remove(u);
+        savedOff.remove(u);
+        pendingRestore.remove(u);
+        staffMode.remove(u);
+        clearBackup(u);
+        persist();
+        send(p, "Ton inventaire a ete recupere.", NamedTextColor.YELLOW);
     }
 
-    private void saveKits() {
-        if (kitsFile == null) return;
+    /** Redondance staff : inv-backups.yml (base64). */
+    private void writeBackup(UUID u, String name, ItemStack[] storage, ItemStack[] armor, ItemStack off) {
+        if (backupFile == null) return;
         synchronized (diskLock) {
-            YamlConfiguration cfg = new YamlConfiguration();
-            for (KitDef k : kits.values()) {
-                String base = "kits." + k.name;
-                cfg.set(base + ".display", k.display);
-                cfg.set(base + ".icon", (k.icon != null ? k.icon.name() : "CHEST"));
-                cfg.set(base + ".cooldown", k.cooldownSeconds);
-                cfg.set(base + ".slot", k.slot);
-                cfg.set(base + ".storage", toBase64Safe(k.storage));
-                cfg.set(base + ".armor", toBase64Safe(k.armor));
-                ItemStack offToSave = (k.offhand != null) ? k.offhand : new ItemStack(Material.AIR);
-                cfg.set(base + ".offhand", toBase64Safe(new ItemStack[]{ offToSave }));
-            }
+            YamlConfiguration cfg = backupFile.exists()
+                    ? YamlConfiguration.loadConfiguration(backupFile) : new YamlConfiguration();
+            String path = "backup." + u;
+            cfg.set(path + ".name", name);
+            cfg.set(path + ".time", System.currentTimeMillis());
+            cfg.set(path + ".storage", toBase64Safe(storage));
+            cfg.set(path + ".armor", toBase64Safe(armor));
+            cfg.set(path + ".offhand", toBase64Safe(new ItemStack[]{ off }));
             try {
-                File dir = kitsFile.getParentFile();
+                File dir = backupFile.getParentFile();
                 if (dir != null && !dir.exists()) dir.mkdirs();
-                cfg.save(kitsFile);
+                cfg.save(backupFile);
             } catch (IOException e) {
-                getLogger().warning("[Kit] sauvegarde kits KO : " + e.getMessage());
+                getLogger().warning("[StaffMode] backup staff KO : " + e.getMessage());
             }
         }
     }
 
-    private void loadCooldowns() {
-        cooldowns.clear();
-        if (cooldownsFile == null || !cooldownsFile.exists()) return;
-        YamlConfiguration cfg;
-        synchronized (diskLock) { cfg = YamlConfiguration.loadConfiguration(cooldownsFile); }
-        ConfigurationSection sec = cfg.getConfigurationSection("players");
-        if (sec == null) return;
-        for (String uid : sec.getKeys(false)) {
-            try {
-                UUID u = UUID.fromString(uid);
-                ConfigurationSection ks = cfg.getConfigurationSection("players." + uid);
-                if (ks == null) continue;
-                Map<String, Long> m = new ConcurrentHashMap<>();
-                for (String kn : ks.getKeys(false))
-                    m.put(kn.toLowerCase(Locale.ROOT), cfg.getLong("players." + uid + "." + kn));
-                if (!m.isEmpty()) cooldowns.put(u, m);
-            } catch (Throwable ignored) {}
-        }
-    }
-
-    private void saveCooldowns() {
-        if (cooldownsFile == null) return;
+    private void clearBackup(UUID u) {
+        if (backupFile == null || !backupFile.exists()) return;
         synchronized (diskLock) {
-            YamlConfiguration cfg = new YamlConfiguration();
-            for (Map.Entry<UUID, Map<String, Long>> e : cooldowns.entrySet()) {
-                for (Map.Entry<String, Long> ke : e.getValue().entrySet())
-                    cfg.set("players." + e.getKey() + "." + ke.getKey(), ke.getValue());
+            YamlConfiguration cfg = YamlConfiguration.loadConfiguration(backupFile);
+            if (cfg.contains("backup." + u)) {
+                cfg.set("backup." + u, null);
+                try { cfg.save(backupFile); } catch (IOException ignored) {}
             }
-            try {
-                File dir = cooldownsFile.getParentFile();
-                if (dir != null && !dir.exists()) dir.mkdirs();
-                cfg.save(cooldownsFile);
-            } catch (IOException e) {
-                getLogger().warning("[Kit] sauvegarde cooldowns KO : " + e.getMessage());
+        }
+    }
+
+    private void loadPending() {
+        savedInv.clear(); savedArmor.clear(); savedOff.clear(); pendingRestore.clear();
+        previousRoles.clear(); staffMembers.clear();
+        if (file == null || !file.exists()) return;
+        YamlConfiguration cfg = YamlConfiguration.loadConfiguration(file);
+
+        ConfigurationSection cs = cfg.getConfigurationSection("pending");
+        if (cs != null) {
+            for (String key : cs.getKeys(false)) {
+                try {
+                    UUID u = UUID.fromString(key);
+                    ItemStack[] storage = fromBase64Safe(cfg.getString("pending." + key + ".storage"));
+                    ItemStack[] armor   = fromBase64Safe(cfg.getString("pending." + key + ".armor"));
+                    ItemStack[] offArr  = fromBase64Safe(cfg.getString("pending." + key + ".offhand"));
+
+                    boolean any = false;
+                    if (storage != null) { savedInv.put(u, storage); any = true; }
+                    if (armor != null)   { savedArmor.put(u, armor); any = true; }
+                    if (offArr != null && offArr.length > 0 && offArr[0] != null) { savedOff.put(u, offArr[0]); any = true; }
+
+                    if (any) pendingRestore.add(u);
+                    else getLogger().warning("[StaffMode] entree pending illisible pour " + key
+                            + " -> ignoree (aucun inventaire ne sera efface).");
+                } catch (Throwable t) {
+                    getLogger().warning("[StaffMode] pending KO pour " + key + " : " + t);
+                }
             }
+        }
+
+        ConfigurationSection rs = cfg.getConfigurationSection("roles");
+        if (rs != null) {
+            for (String key : rs.getKeys(false)) {
+                try {
+                    UUID u = UUID.fromString(key);
+                    List<String> groups = cfg.getStringList("roles." + key);
+                    if (groups != null && !groups.isEmpty()) {
+                        previousRoles.put(u, new ArrayList<>(groups));
+                    } else {
+                        // Compat ancien format (un seul groupe stocke en String).
+                        String single = cfg.getString("roles." + key);
+                        if (single != null && !single.isEmpty()) {
+                            List<String> one = new ArrayList<>();
+                            one.add(single);
+                            previousRoles.put(u, one);
+                        }
+                    }
+                } catch (Throwable t) { getLogger().warning("[StaffMode] role KO pour " + key + " : " + t); }
+            }
+        }
+
+        for (String s : cfg.getStringList("staffMembers")) {
+            try { staffMembers.add(UUID.fromString(s)); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void persist() {
+        if (file == null) return;
+        YamlConfiguration cfg = new YamlConfiguration();
+
+        Set<UUID> keys = new HashSet<>();
+        keys.addAll(savedInv.keySet());
+        keys.addAll(savedArmor.keySet());
+        keys.addAll(savedOff.keySet());
+        for (UUID u : keys) {
+            String path = "pending." + u;
+            if (savedInv.get(u) != null)   cfg.set(path + ".storage", toBase64Safe(savedInv.get(u)));
+            if (savedArmor.get(u) != null) cfg.set(path + ".armor",   toBase64Safe(savedArmor.get(u)));
+            if (savedOff.get(u) != null)   cfg.set(path + ".offhand", toBase64Safe(new ItemStack[]{ savedOff.get(u) }));
+        }
+
+        for (Map.Entry<UUID, List<String>> e : previousRoles.entrySet()) cfg.set("roles." + e.getKey(), e.getValue());
+
+        List<String> sm = new ArrayList<>();
+        for (UUID u : staffMembers) sm.add(u.toString());
+        cfg.set("staffMembers", sm);
+
+        try {
+            File dir = file.getParentFile();
+            if (dir != null && !dir.exists()) dir.mkdirs();
+            cfg.save(file);
+        } catch (IOException e) {
+            getLogger().warning("[StaffMode] sauvegarde KO : " + e.getMessage());
         }
     }
 }
