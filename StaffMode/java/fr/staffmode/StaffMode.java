@@ -296,36 +296,36 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     /**
      * Remet au joueur ses grades d'avant le /staff, EN REMETTANT SON GRADE PRINCIPAL
-     * (donc l'affichage revient). Garde aussi les grades gagnes pendant le service
-     * (ex: grade boutique achete), sauf le grade "joueur" force par le mode staff.
+     * (donc l'affichage revient). N'efface RIEN : on rajoute les grades memorises, on
+     * enleve juste le grade "joueur" force, et on garde les grades gagnes pendant le
+     * service (ex: grade boutique achete).
      *
      * saved[0] = grade principal, saved[1..] = autres grades.
      */
     private void restoreRealGrades(Player p, List<String> saved) {
         if (saved == null || saved.isEmpty()) return;
         UUID u = p.getUniqueId();
-
         String mainGroup = saved.get(0);
-        java.util.LinkedHashSet<String> others = new java.util.LinkedHashSet<>();
-        for (int i = 1; i < saved.size(); i++) {
-            String g = saved.get(i);
-            if (g != null && !g.isEmpty() && !g.equalsIgnoreCase(mainGroup)) others.add(g);
+
+        // 1) On re-ajoute TOUS les grades memorises (sans rien effacer d'abord).
+        for (String g : saved) {
+            if (g != null && !g.isEmpty()) lpRun("user " + u + " parent add " + g);
         }
-        // On conserve les grades gagnes pendant le service, sauf le grade "joueur" force.
-        List<String> current = getParentGroups(p);
-        if (current != null) {
-            for (String g : current) {
-                if (g != null && !g.isEmpty()
-                        && (playerGroup == null || !g.equalsIgnoreCase(playerGroup))
-                        && !g.equalsIgnoreCase(mainGroup)) {
-                    others.add(g);
-                }
-            }
+        // 2) On enleve le grade "joueur" force par le mode staff (sauf s'il fait vraiment
+        //    partie des grades d'origine du joueur).
+        if (playerGroup != null && !playerGroup.isEmpty() && !containsIgnoreCase(saved, playerGroup)) {
+            lpRun("user " + u + " parent remove " + playerGroup);
         }
-        // 1) parent set = remet le grade PRINCIPAL (et nettoie les autres) -> l'affichage revient.
-        lpRun("user " + u + " parent set " + mainGroup);
-        // 2) On rajoute tous les autres grades (permissions + grade boutique conserve).
-        for (String g : others) lpRun("user " + u + " parent add " + g);
+        // 3) On remet le grade PRINCIPAL pour que l'affichage revienne.
+        if (mainGroup != null && !mainGroup.isEmpty()) {
+            lpRun("user " + u + " parent switchprimarygroup " + mainGroup);
+        }
+    }
+
+    private boolean containsIgnoreCase(List<String> list, String v) {
+        if (list == null || v == null) return false;
+        for (String s : list) if (v.equalsIgnoreCase(s)) return true;
+        return false;
     }
 
     /** Entree en staff : on memorise le grade PRINCIPAL + tous les grades, puis on passe "joueur". */
