@@ -10,6 +10,7 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.Sound;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
@@ -251,14 +252,23 @@ public class Attout extends LoadedPlugin implements Listener {
 
     @EventHandler
     public void onClick(InventoryClickEvent e) {
-        if (!(e.getInventory().getHolder() instanceof Menu)) return;
-        e.setCancelled(true); // on verrouille tout le menu
+        // On identifie le menu via l'inventaire du HAUT (plus robuste selon les versions).
+        if (!(e.getView().getTopInventory().getHolder() instanceof Menu)) return;
+
+        // Menu verrouille : on bloque TOUT (clic haut, clic bas, shift-clic, molette, drop...).
+        e.setCancelled(true);
+        e.setResult(Event.Result.DENY);
+
         if (!(e.getWhoClicked() instanceof Player p)) return;
+
+        // On ne reagit qu'aux clics faits DANS le menu (haut), pas dans l'inventaire perso.
+        if (e.getClickedInventory() == null
+                || !(e.getClickedInventory().getHolder() instanceof Menu)) return;
 
         ItemStack it = e.getCurrentItem();
         if (it == null || !it.hasItemMeta()) return;
         String key = it.getItemMeta().getPersistentDataContainer().get(KEY_ATOUT, PersistentDataType.STRING);
-        if (key == null) return; // verre ou slot vide
+        if (key == null) return; // verre, slot vide, ou item du joueur
 
         switch (key) {
             case "close" -> p.closeInventory();
@@ -266,7 +276,7 @@ public class Attout extends LoadedPlugin implements Listener {
             case "tout_on" -> {
                 for (Atout a : ATOUTS) setAtout(p, a, true);
                 saveData();
-                refreshAtouts(p, e.getInventory());
+                refreshAtouts(p, e.getView().getTopInventory());
                 p.playSound(p.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1f, 1.2f);
                 p.sendMessage(msg("Tous les atouts ont ete actives.", NamedTextColor.GREEN));
             }
@@ -274,7 +284,7 @@ public class Attout extends LoadedPlugin implements Listener {
             case "tout_off" -> {
                 for (Atout a : ATOUTS) setAtout(p, a, false);
                 saveData();
-                refreshAtouts(p, e.getInventory());
+                refreshAtouts(p, e.getView().getTopInventory());
                 p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 1f, 0.8f);
                 p.sendMessage(msg("Tous les atouts ont ete desactives.", NamedTextColor.RED));
             }
@@ -283,7 +293,7 @@ public class Attout extends LoadedPlugin implements Listener {
                 Atout a = findAtout(key);
                 if (a == null) return;
                 boolean on = toggle(p, a);
-                refreshAtouts(p, e.getInventory());
+                refreshAtouts(p, e.getView().getTopInventory());
                 p.playSound(p.getLocation(),
                         on ? Sound.ENTITY_EXPERIENCE_ORB_PICKUP : Sound.BLOCK_NOTE_BLOCK_BASS,
                         1f, on ? 1.4f : 0.8f);
@@ -296,7 +306,10 @@ public class Attout extends LoadedPlugin implements Listener {
 
     @EventHandler
     public void onDrag(InventoryDragEvent e) {
-        if (e.getInventory().getHolder() instanceof Menu) e.setCancelled(true);
+        if (e.getView().getTopInventory().getHolder() instanceof Menu) {
+            e.setCancelled(true);
+            e.setResult(Event.Result.DENY);
+        }
     }
 
     private void refreshAtouts(Player p, Inventory inv) {
