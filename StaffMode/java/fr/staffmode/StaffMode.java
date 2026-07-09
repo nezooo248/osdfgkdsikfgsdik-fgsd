@@ -277,6 +277,17 @@ public class StaffMode extends LoadedPlugin implements Listener {
     }
 
     /**
+     * Verification DYNAMIQUE de LuckPerms (a chaque usage), au lieu d'une seule fois au
+     * demarrage. Corrige le cas ou StaffMode se charge AVANT LuckPerms (loader custom) :
+     * sinon le plugin croyait LuckPerms absent pour toujours et ne changeait jamais le grade.
+     */
+    private boolean lpReady() {
+        boolean ok = hasLuckPerms();
+        if (ok && !luckPermsPresent) luckPermsPresent = true; // on met a jour le flag une fois LuckPerms charge
+        return ok;
+    }
+
+    /**
      * Classloader capable de charger les classes net.luckperms.api.*.
      * On prend celui de LuckPerms lui-meme : c'est LA correction du bug de grade.
      * Avec le loader custom (fr.loader), le classloader du plugin ne voit pas ces
@@ -359,9 +370,22 @@ public class StaffMode extends LoadedPlugin implements Listener {
         return false;
     }
 
+    /** Ordre de priorite standard (owner = le plus haut). Toujours teste, meme si absent de la config. */
+    private static final List<String> DEFAULT_STAFF_PRIORITY =
+            List.of("owner", "super_admin", "admin", "super_modo", "mod");
+
+    /** Liste effective des grades a tester, dans l'ordre de priorite (haut -> bas). */
+    private List<String> effectiveGradePriority() {
+        List<String> out = new ArrayList<>(DEFAULT_STAFF_PRIORITY);
+        for (String g : gradeList) {
+            if (g != null && !g.isEmpty() && !containsIgnoreCase(out, g)) out.add(g);
+        }
+        return out;
+    }
+
     /** Choisit le grade staff le PLUS HAUT pour lequel le joueur a la permission grade.<nom>. */
     private String pickStaffGrade(Player p) {
-        for (String g : gradeList) {
+        for (String g : effectiveGradePriority()) {
             if (g == null || g.isEmpty()) continue;
             if (p.hasPermission("grade." + g)) return g;
         }
@@ -374,7 +398,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
      * touches. Le grade ajoute est memorise (via gradeToggled) pour etre RETIRE a la sortie.
      */
     private void applyRoleOnEnter(Player p) {
-        if (!roleEnabled || !luckPermsPresent) return;
+        if (!roleEnabled || !lpReady()) return;
         UUID u = p.getUniqueId();
 
         String grade = pickStaffGrade(p);
@@ -409,7 +433,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
      * grade staff est fait par clearToggledGrades (appele juste avant dans exitStaff / onQuit).
      */
     private void applyRoleOnExit(Player p) {
-        if (!roleEnabled || !luckPermsPresent) return;
+        if (!roleEnabled || !lpReady()) return;
         UUID u = p.getUniqueId();
         String primary = previousPrimary.remove(u);
         if (primary != null && !primary.isEmpty()) {
@@ -496,7 +520,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
             send(p, "Tu dois d'abord etre en /staff pour utiliser /grade.", NamedTextColor.RED);
             return true;
         }
-        if (!luckPermsPresent) {
+        if (!lpReady()) {
             send(p, "LuckPerms introuvable -> /grade indisponible.", NamedTextColor.RED);
             return true;
         }
@@ -1165,7 +1189,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
         // Si un grade staff avait ete ajoute mais pas encore retire (ex: crash pendant le
         // mode staff), on le retire ici et on remet l'affichage a la reconnexion.
-        if (roleEnabled && luckPermsPresent) {
+        if (roleEnabled && lpReady()) {
             clearToggledGrades(p);
             applyRoleOnExit(p);
         }
