@@ -12,12 +12,15 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
@@ -36,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Attout - a mettre dans : fr/attout/Attout.java
@@ -43,29 +47,24 @@ import java.util.UUID;
  * /attout  (permission : vip.attout)
  *   -> ouvre un menu double coffre (54 slots) avec les "atouts" VIP.
  *   -> clic sur un atout = ACTIVE, re-clic = DESACTIVE (toggle).
- *
- * Les atouts sont des effets infinis (Force II, Vitesse II, Regen II, Resistance II,
- * Saut II, Celerite II) + Anti-chute, Resistance au feu, Respiration, Vision nocturne.
- *
- * L'etat de chaque joueur est sauvegarde sur le disque dans attout.yml, et les effets
- * sont re-appliques a la connexion, au respawn et via une tache periodique.
  */
 public class Attout extends LoadedPlugin implements Listener {
 
-    // Cle PDC posee sur les items du menu pour savoir sur quoi le joueur a clique.
     private static final NamespacedKey KEY_ATOUT = new NamespacedKey("attout", "atout");
-
-    // Duree "infinie" : -1 sur les serveurs recents (Paper 1.19.4+), sinon Integer.MAX_VALUE.
     private static final int INFINITE = resolveInfinite();
+
+    // Mets a false une fois que tout marche pour arreter les logs de debug.
+    private static final boolean DEBUG = true;
 
     private static final Component TITLE =
             Component.text("Atouts VIP", NamedTextColor.GOLD, TextDecoration.BOLD)
                     .decoration(TextDecoration.ITALIC, false);
 
-    // Etat en memoire : joueur -> ensemble des atouts actifs.
     private final Map<UUID, Set<String>> active = new HashMap<>();
-    // Cache de resolution des PotionEffectType (les noms changent selon les versions).
     private final Map<String, PotionEffectType> effectCache = new HashMap<>();
+
+    // Qui a NOTRE menu ouvert. Independant du holder / classloader => 100% fiable.
+    private final Set<UUID> menuOpen = ConcurrentHashMap.newKeySet();
 
     private File file;
     private YamlConfiguration data;
@@ -73,15 +72,12 @@ public class Attout extends LoadedPlugin implements Listener {
 
     // ===================== LISTE DES ATOUTS =====================
 
-    /** Definition d'un atout. effectNames == null => atout "custom" (ex : anti-chute). */
     private static final class Atout {
-        final String key;            // identifiant interne
-        final String name;           // nom affiche
-        final Material icon;         // icone dans le menu
-        final NamedTextColor color;  // couleur du nom
-        final String desc;           // description (lore)
-        final String[] effectNames;  // noms candidats du PotionEffectType (null = custom)
-        final int amplifier;         // 0 = niveau I, 1 = niveau II
+        final String key, name, desc;
+        final Material icon;
+        final NamedTextColor color;
+        final String[] effectNames;
+        final int amplifier;
 
         Atout(String key, String name, Material icon, NamedTextColor color,
               String desc, String[] effectNames, int amplifier) {
@@ -90,7 +86,6 @@ public class Attout extends LoadedPlugin implements Listener {
         }
     }
 
-    // Tous les atouts. "tout en 2 infini" => amplifier 1 (= niveau II) pour ceux ou ca a du sens.
     private static final Atout[] ATOUTS = {
             new Atout("force",    "Force",             Material.BLAZE_POWDER,    NamedTextColor.RED,          "Inflige plus de degats",   new String[]{"STRENGTH", "INCREASE_DAMAGE"}, 1),
             new Atout("vitesse",  "Vitesse",           Material.SUGAR,           NamedTextColor.AQUA,         "Deplace-toi plus vite",    new String[]{"SPEED"},                       1),
@@ -104,14 +99,13 @@ public class Attout extends LoadedPlugin implements Listener {
             new Atout("nightvis", "Vision nocturne",   Material.ENDER_EYE,       NamedTextColor.DARK_AQUA,    "Vois dans le noir",        new String[]{"NIGHT_VISION"},                0),
     };
 
-    // Emplacements des atouts dans le menu (2 rangees centrees).
     private static final int[] ATOUT_SLOTS = {11, 12, 13, 14, 15, 29, 30, 31, 32, 33};
 
     // ===================== CYCLE DE VIE =====================
 
     @Override
     public void onEnable() {
-        unregisterStaleListeners(); // evite les listeners fantomes apres /plreload
+        unregisterStaleListeners();
         loadData();
         registerListener(this);
 
@@ -128,17 +122,14 @@ public class Attout extends LoadedPlugin implements Listener {
             return true;
         });
 
-        // Tache periodique (toutes les 10s) : garde les effets bien appliques.
         if (getHost() instanceof org.bukkit.plugin.Plugin plugin) {
             refreshTaskId = Bukkit.getScheduler()
                     .runTaskTimer(plugin, this::reapplyAll, 200L, 200L)
                     .getTaskId();
         }
 
-        // Reapplique pour les joueurs deja connectes (cas d'un /plreload).
         reapplyAll();
-
-        getLogger().info("Attout active.");
+        getLogger().info("Attout active. (DEBUG=" + DEBUG + ")");
     }
 
     @Override
@@ -148,11 +139,11 @@ public class Attout extends LoadedPlugin implements Listener {
             refreshTaskId = -1;
         }
         try { HandlerList.unregisterAll(this); } catch (Throwable ignored) {}
+        menuOpen.clear();
         saveData();
         getLogger().info("Attout desactive.");
     }
 
-    /** Supprime tout listener Attout fantome d'un ancien chargement (compare par nom de classe). */
     private void unregisterStaleListeners() {
         try {
             String myClass = getClass().getName();
@@ -167,9 +158,8 @@ public class Attout extends LoadedPlugin implements Listener {
         } catch (Throwable ignored) {}
     }
 
-    // ===================== MENU (double coffre) =====================
+    // ===================== MENU =====================
 
-    /** Holder qui identifie NOTRE menu (evite de comparer des titres). */
     private static final class Menu implements InventoryHolder {
         private Inventory inv;
         @Override public Inventory getInventory() { return inv; }
@@ -180,7 +170,6 @@ public class Attout extends LoadedPlugin implements Listener {
         Inventory inv = Bukkit.createInventory(holder, 54, TITLE);
         holder.inv = inv;
 
-        // Decoration : bordure noire + fond gris.
         ItemStack black = pane(Material.BLACK_STAINED_GLASS_PANE);
         ItemStack gray  = pane(Material.GRAY_STAINED_GLASS_PANE);
         for (int i = 0; i < 54; i++) {
@@ -188,16 +177,13 @@ public class Attout extends LoadedPlugin implements Listener {
             inv.setItem(i, (row == 0 || row == 5 || col == 0 || col == 8) ? black : gray);
         }
 
-        // Les atouts.
-        for (int i = 0; i < ATOUTS.length; i++) {
-            inv.setItem(ATOUT_SLOTS[i], buildAtoutItem(p, ATOUTS[i]));
-        }
+        for (int i = 0; i < ATOUTS.length; i++) inv.setItem(ATOUT_SLOTS[i], buildAtoutItem(p, ATOUTS[i]));
 
-        // Les boutons de controle (rangee du bas).
         inv.setItem(38, control("tout_on",  Material.LIME_DYE,  "Tout activer",     NamedTextColor.GREEN));
         inv.setItem(40, control("close",    Material.BARRIER,   "Fermer",           NamedTextColor.RED));
         inv.setItem(42, control("tout_off", Material.RED_DYE,   "Tout desactiver",  NamedTextColor.RED));
 
+        menuOpen.add(p.getUniqueId());   // <-- on marque le menu comme ouvert
         p.openInventory(inv);
     }
 
@@ -208,7 +194,6 @@ public class Attout extends LoadedPlugin implements Listener {
         if (meta != null) {
             meta.displayName(Component.text(a.name, a.color, TextDecoration.BOLD)
                     .decoration(TextDecoration.ITALIC, false));
-
             List<Component> lore = new ArrayList<>();
             lore.add(line(a.desc, NamedTextColor.GRAY));
             lore.add(Component.empty());
@@ -217,9 +202,7 @@ public class Attout extends LoadedPlugin implements Listener {
                             on ? NamedTextColor.GREEN : NamedTextColor.RED, TextDecoration.BOLD)));
             lore.add(line(on ? "Clic pour desactiver" : "Clic pour activer", NamedTextColor.DARK_GRAY));
             meta.lore(lore);
-
             if (on) { try { meta.setEnchantmentGlintOverride(true); } catch (Throwable ignored) {} }
-
             meta.getPersistentDataContainer().set(KEY_ATOUT, PersistentDataType.STRING, a.key);
             is.setItemMeta(meta);
         }
@@ -241,38 +224,34 @@ public class Attout extends LoadedPlugin implements Listener {
     private ItemStack pane(Material m) {
         ItemStack is = new ItemStack(m);
         ItemMeta meta = is.getItemMeta();
-        if (meta != null) {
-            meta.displayName(Component.text(" "));
-            is.setItemMeta(meta);
-        }
+        if (meta != null) { meta.displayName(Component.text(" ")); is.setItemMeta(meta); }
         return is;
     }
 
-    // ===================== CLICS DANS LE MENU =====================
+    // ===================== CLICS =====================
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
     public void onClick(InventoryClickEvent e) {
-        // On identifie le menu via l'inventaire du HAUT (plus robuste selon les versions).
-        if (!(e.getView().getTopInventory().getHolder() instanceof Menu)) return;
+        if (!(e.getWhoClicked() instanceof Player p)) return;
+        if (!menuOpen.contains(p.getUniqueId())) return; // le joueur n'a pas notre menu ouvert
 
-        // Menu verrouille : on bloque TOUT (clic haut, clic bas, shift-clic, molette, drop...).
+        if (DEBUG) getLogger().info("[Attout] clic detecte de " + p.getName()
+                + " rawSlot=" + e.getRawSlot() + " action=" + e.getAction());
+
+        // Menu 100% verrouille : rien ne bouge.
         e.setCancelled(true);
         e.setResult(Event.Result.DENY);
 
-        if (!(e.getWhoClicked() instanceof Player p)) return;
-
-        // On ne reagit qu'aux clics faits DANS le menu (haut), pas dans l'inventaire perso.
-        if (e.getClickedInventory() == null
-                || !(e.getClickedInventory().getHolder() instanceof Menu)) return;
+        int top = e.getView().getTopInventory().getSize();
+        if (e.getRawSlot() < 0 || e.getRawSlot() >= top) return; // clic dans l'inventaire perso
 
         ItemStack it = e.getCurrentItem();
         if (it == null || !it.hasItemMeta()) return;
         String key = it.getItemMeta().getPersistentDataContainer().get(KEY_ATOUT, PersistentDataType.STRING);
-        if (key == null) return; // verre, slot vide, ou item du joueur
+        if (key == null) return;
 
         switch (key) {
             case "close" -> p.closeInventory();
-
             case "tout_on" -> {
                 for (Atout a : ATOUTS) setAtout(p, a, true);
                 saveData();
@@ -280,7 +259,6 @@ public class Attout extends LoadedPlugin implements Listener {
                 p.playSound(p.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1f, 1.2f);
                 p.sendMessage(msg("Tous les atouts ont ete actives.", NamedTextColor.GREEN));
             }
-
             case "tout_off" -> {
                 for (Atout a : ATOUTS) setAtout(p, a, false);
                 saveData();
@@ -288,7 +266,6 @@ public class Attout extends LoadedPlugin implements Listener {
                 p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 1f, 0.8f);
                 p.sendMessage(msg("Tous les atouts ont ete desactives.", NamedTextColor.RED));
             }
-
             default -> {
                 Atout a = findAtout(key);
                 if (a == null) return;
@@ -304,18 +281,26 @@ public class Attout extends LoadedPlugin implements Listener {
         }
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onDrag(InventoryDragEvent e) {
-        if (e.getView().getTopInventory().getHolder() instanceof Menu) {
+        if (e.getWhoClicked() instanceof Player p && menuOpen.contains(p.getUniqueId())) {
             e.setCancelled(true);
             e.setResult(Event.Result.DENY);
         }
     }
 
+    @EventHandler
+    public void onClose(InventoryCloseEvent e) {
+        if (e.getPlayer() instanceof Player p) menuOpen.remove(p.getUniqueId());
+    }
+
+    @EventHandler
+    public void onQuit(PlayerQuitEvent e) {
+        menuOpen.remove(e.getPlayer().getUniqueId());
+    }
+
     private void refreshAtouts(Player p, Inventory inv) {
-        for (int i = 0; i < ATOUTS.length; i++) {
-            inv.setItem(ATOUT_SLOTS[i], buildAtoutItem(p, ATOUTS[i]));
-        }
+        for (int i = 0; i < ATOUTS.length; i++) inv.setItem(ATOUT_SLOTS[i], buildAtoutItem(p, ATOUTS[i]));
     }
 
     private Atout findAtout(String key) {
@@ -325,23 +310,19 @@ public class Attout extends LoadedPlugin implements Listener {
 
     // ===================== ETAT + EFFETS =====================
 
-    private Set<String> getActive(UUID id) {
-        return active.computeIfAbsent(id, k -> new HashSet<>());
-    }
+    private Set<String> getActive(UUID id) { return active.computeIfAbsent(id, k -> new HashSet<>()); }
 
     private boolean isActive(UUID id, String key) {
         Set<String> s = active.get(id);
         return s != null && s.contains(key);
     }
 
-    /** Active ou desactive un atout (sans sauvegarder ; le save est fait par l'appelant). */
     private void setAtout(Player p, Atout a, boolean on) {
         Set<String> s = getActive(p.getUniqueId());
         if (on) { if (s.add(a.key))    applyEffect(p, a); }
         else    { if (s.remove(a.key)) removeEffect(p, a); }
     }
 
-    /** Inverse l'etat d'un atout et sauvegarde. Renvoie true si desormais actif. */
     private boolean toggle(Player p, Atout a) {
         boolean newState = !isActive(p.getUniqueId(), a.key);
         setAtout(p, a, newState);
@@ -350,10 +331,9 @@ public class Attout extends LoadedPlugin implements Listener {
     }
 
     private void applyEffect(Player p, Atout a) {
-        if (a.effectNames == null) return; // atout custom (anti-chute) -> gere par onDamage
+        if (a.effectNames == null) return;
         PotionEffectType type = resolveEffect(a.effectNames);
         if (type == null) return;
-        // ambient=false, particules=false, icone=true
         p.addPotionEffect(new PotionEffect(type, INFINITE, a.amplifier, false, false, true));
     }
 
@@ -369,19 +349,14 @@ public class Attout extends LoadedPlugin implements Listener {
         for (Atout a : ATOUTS) if (s.contains(a.key)) applyEffect(p, a);
     }
 
-    private void reapplyAll() {
-        for (Player p : Bukkit.getOnlinePlayers()) reapply(p);
-    }
+    private void reapplyAll() { for (Player p : Bukkit.getOnlinePlayers()) reapply(p); }
 
     @EventHandler
-    public void onJoin(PlayerJoinEvent e) {
-        reapply(e.getPlayer());
-    }
+    public void onJoin(PlayerJoinEvent e) { reapply(e.getPlayer()); }
 
     @EventHandler
     public void onRespawn(PlayerRespawnEvent e) {
         Player p = e.getPlayer();
-        // Le respawn efface les effets : on les remet 1 tick plus tard.
         if (getHost() instanceof org.bukkit.plugin.Plugin plugin) {
             Bukkit.getScheduler().runTask(plugin, () -> reapply(p));
         } else {
@@ -392,22 +367,16 @@ public class Attout extends LoadedPlugin implements Listener {
     @EventHandler
     public void onDamage(EntityDamageEvent e) {
         if (e.getCause() != EntityDamageEvent.DamageCause.FALL) return;
-        if (e.getEntity() instanceof Player p && isActive(p.getUniqueId(), "nofall")) {
-            e.setCancelled(true);
-        }
+        if (e.getEntity() instanceof Player p && isActive(p.getUniqueId(), "nofall")) e.setCancelled(true);
     }
 
-    /** Resout un PotionEffectType robustement (les noms varient selon la version). */
     private PotionEffectType resolveEffect(String[] names) {
         String cacheKey = names[0];
         if (effectCache.containsKey(cacheKey)) return effectCache.get(cacheKey);
-
         PotionEffectType found = null;
         for (String n : names) {
-            try {
-                PotionEffectType t = PotionEffectType.getByName(n);
-                if (t != null) { found = t; break; }
-            } catch (Throwable ignored) {}
+            try { PotionEffectType t = PotionEffectType.getByName(n); if (t != null) { found = t; break; } }
+            catch (Throwable ignored) {}
         }
         if (found == null) {
             for (String n : names) {
@@ -425,10 +394,8 @@ public class Attout extends LoadedPlugin implements Listener {
     private static int resolveInfinite() {
         try {
             java.lang.reflect.Field f = PotionEffect.class.getField("INFINITE_DURATION");
-            return f.getInt(null); // -1 sur les versions recentes
-        } catch (Throwable t) {
-            return Integer.MAX_VALUE;
-        }
+            return f.getInt(null);
+        } catch (Throwable t) { return Integer.MAX_VALUE; }
     }
 
     // ===================== PERSISTANCE =====================
@@ -439,7 +406,6 @@ public class Attout extends LoadedPlugin implements Listener {
             if (dir != null && !dir.exists()) dir.mkdirs();
             file = new File(dir, "attout.yml");
             data = file.exists() ? YamlConfiguration.loadConfiguration(file) : new YamlConfiguration();
-
             active.clear();
             if (data.isConfigurationSection("players")) {
                 for (String uid : data.getConfigurationSection("players").getKeys(false)) {
@@ -456,7 +422,7 @@ public class Attout extends LoadedPlugin implements Listener {
     private void saveData() {
         if (file == null || data == null) return;
         try {
-            data.set("players", null); // on reecrit tout proprement
+            data.set("players", null);
             for (Map.Entry<UUID, Set<String>> en : active.entrySet()) {
                 if (en.getValue().isEmpty()) continue;
                 data.set("players." + en.getKey(), new ArrayList<>(en.getValue()));
@@ -474,10 +440,7 @@ public class Attout extends LoadedPlugin implements Listener {
     static final Component PREFIX = Component.text("Atouts ", NamedTextColor.GOLD, TextDecoration.BOLD)
             .append(Component.text("» ", NamedTextColor.DARK_GRAY));
 
-    private Component msg(String text, NamedTextColor color) {
-        return PREFIX.append(Component.text(text, color));
-    }
-
+    private Component msg(String text, NamedTextColor color) { return PREFIX.append(Component.text(text, color)); }
     private Component line(String text, NamedTextColor color) {
         return Component.text(text, color).decoration(TextDecoration.ITALIC, false);
     }
