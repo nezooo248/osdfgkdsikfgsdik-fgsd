@@ -63,6 +63,14 @@ import java.util.concurrent.ConcurrentHashMap;
  *                      pendant le service (ex: grade boutique achete) sont conserves.
  *   Ex : tu es "admin", /staff -> tu es "joueur", /staff -> tu es "admin".
  *
+ *   >>> CORRECTIF IMPORTANT <<<
+ *   L'ancienne version lisait l'API LuckPerms via le classloader du plugin. Avec un
+ *   loader custom (fr.loader.api.LoadedPlugin), ce classloader ne voit PAS les classes
+ *   de LuckPerms -> la lecture des grades echouait silencieusement -> le grade n'etait
+ *   ni change a l'entree, ni restaure a la sortie. On charge maintenant l'API via le
+ *   classloader de LuckPerms lui-meme (voir lpClassLoader / lpApiOrNull), ce qui repare
+ *   completement la gestion des grades.
+ *
  * BACKUP UNIVERSEL : toutes les X secondes, l'inventaire COMPLET de chaque joueur en
  * ligne (inventaire + armure + main gauche + ender chest) est serialise en base64 et
  * sauvegarde sur le disque, avec un historique par joueur. Un backup est aussi pris a
@@ -247,6 +255,31 @@ public class StaffMode extends LoadedPlugin implements Listener {
         catch (Throwable t) { return false; }
     }
 
+    /**
+     * Classloader capable de charger les classes net.luckperms.api.*.
+     * On prend celui de LuckPerms lui-meme : c'est LA correction du bug de grade.
+     * Avec le loader custom (fr.loader), le classloader du plugin ne voit pas ces
+     * classes, donc la reflection echouait et le grade n'etait jamais touche.
+     */
+    private ClassLoader lpClassLoader() {
+        try {
+            org.bukkit.plugin.Plugin lp = Bukkit.getPluginManager().getPlugin("LuckPerms");
+            if (lp != null) return lp.getClass().getClassLoader();
+        } catch (Throwable ignored) {}
+        return getClass().getClassLoader();
+    }
+
+    /** Recupere l'instance de l'API LuckPerms, ou null si indisponible. */
+    private Object lpApiOrNull() {
+        try {
+            Class<?> provider = Class.forName("net.luckperms.api.LuckPermsProvider", true, lpClassLoader());
+            return provider.getMethod("get").invoke(null);
+        } catch (Throwable t) {
+            getLogger().warning("[StaffMode] API LuckPerms inaccessible : " + t);
+            return null;
+        }
+    }
+
     private void lpRun(String args) {
         try {
             Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "lp " + args);
@@ -262,7 +295,8 @@ public class StaffMode extends LoadedPlugin implements Listener {
     @SuppressWarnings("unchecked")
     private List<String> getParentGroups(Player p) {
         try {
-            Object lp = Class.forName("net.luckperms.api.LuckPermsProvider").getMethod("get").invoke(null);
+            Object lp = lpApiOrNull();
+            if (lp == null) return null;
             Object um = lp.getClass().getMethod("getUserManager").invoke(lp);
             Object user = um.getClass().getMethod("getUser", UUID.class).invoke(um, p.getUniqueId());
             if (user == null) return null;
@@ -285,13 +319,17 @@ public class StaffMode extends LoadedPlugin implements Listener {
     /** Grade PRINCIPAL LuckPerms (celui qui pilote l'affichage du grade/prefix). */
     private String getPrimaryGroup(Player p) {
         try {
-            Object lp = Class.forName("net.luckperms.api.LuckPermsProvider").getMethod("get").invoke(null);
+            Object lp = lpApiOrNull();
+            if (lp == null) return null;
             Object um = lp.getClass().getMethod("getUserManager").invoke(lp);
             Object user = um.getClass().getMethod("getUser", UUID.class).invoke(um, p.getUniqueId());
             if (user == null) return null;
             Object grp = user.getClass().getMethod("getPrimaryGroup").invoke(user);
             return grp != null ? grp.toString() : null;
-        } catch (Throwable t) { return null; }
+        } catch (Throwable t) {
+            getLogger().warning("[StaffMode] lecture du grade principal KO pour " + p.getName() + " : " + t);
+            return null;
+        }
     }
 
     /**
@@ -355,6 +393,8 @@ public class StaffMode extends LoadedPlugin implements Listener {
         // On passe le joueur en grade "joueur" pour qu'il soit discret pendant le service.
         if (playerGroup != null && !playerGroup.isEmpty()) {
             lpRun("user " + p.getUniqueId() + " parent set " + playerGroup);
+            getLogger().info("[StaffMode] " + p.getName() + " -> grade '" + playerGroup
+                    + "' (grades memorises : " + ordered + ").");
         }
     }
 
@@ -364,6 +404,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
         List<String> groups = previousRoles.remove(p.getUniqueId());
         if (groups != null && !groups.isEmpty()) {
             restoreRealGrades(p, groups);
+            getLogger().info("[StaffMode] " + p.getName() + " -> grades restaures : " + groups + ".");
         } else {
             getLogger().info("[StaffMode] aucun grade memorise pour " + p.getName()
                     + " -> grade laisse tel quel (rien ecrase).");
