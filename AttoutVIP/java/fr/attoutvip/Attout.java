@@ -8,6 +8,8 @@ import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Sound;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandMap;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
@@ -32,6 +34,8 @@ import org.bukkit.potion.PotionEffectType;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -106,6 +110,7 @@ public class Attout extends LoadedPlugin implements Listener {
     @Override
     public void onEnable() {
         unregisterStaleListeners();
+        purgeCommand("attout"); // vire l'ancienne commande fantome pour liberer le nom court
         loadData();
         registerListener(this);
 
@@ -129,7 +134,55 @@ public class Attout extends LoadedPlugin implements Listener {
         }
 
         reapplyAll();
+        for (Player p : Bukkit.getOnlinePlayers()) { try { p.updateCommands(); } catch (Throwable ignored) {} }
         getLogger().info("Attout active. (DEBUG=" + DEBUG + ")");
+    }
+
+    // ===================== NETTOYAGE COMMANDE FANTOME =====================
+
+    private CommandMap getCommandMap() {
+        try {
+            Object server = Bukkit.getServer();
+            Method m = server.getClass().getMethod("getCommandMap");
+            return (CommandMap) m.invoke(server);
+        } catch (Throwable t) { return null; }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Command> knownCommands(CommandMap map) {
+        Class<?> c = map.getClass();
+        while (c != null) {
+            try {
+                Field f = c.getDeclaredField("knownCommands");
+                f.setAccessible(true);
+                return (Map<String, Command>) f.get(map);
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            } catch (Exception e) { return null; }
+        }
+        return null;
+    }
+
+    /** Supprime toute commande deja enregistree sous ce nom (court ET prefixe) : ex "attout" + "xxx:attout". */
+    private void purgeCommand(String name) {
+        try {
+            CommandMap map = getCommandMap();
+            if (map == null) return;
+            Map<String, Command> known = knownCommands(map);
+            if (known == null) return;
+            List<String> toRemove = new ArrayList<>();
+            for (String k : known.keySet()) {
+                if (k.equals(name) || k.endsWith(":" + name)) toRemove.add(k);
+            }
+            for (String k : toRemove) {
+                Command c = known.remove(k);
+                if (c != null) { try { c.unregister(map); } catch (Throwable ignored) {} }
+            }
+            if (!toRemove.isEmpty() && DEBUG)
+                getLogger().info("[Attout] commandes fantomes supprimees : " + toRemove);
+        } catch (Throwable t) {
+            getLogger().warning("[Attout] purge commande KO : " + t);
+        }
     }
 
     @Override
