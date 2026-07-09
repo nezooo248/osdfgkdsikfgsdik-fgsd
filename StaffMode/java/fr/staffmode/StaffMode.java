@@ -86,7 +86,8 @@ public class StaffMode extends LoadedPlugin implements Listener {
     private final Map<UUID, ItemStack>   savedOff   = new ConcurrentHashMap<>();
     private final Set<UUID> pendingRestore = ConcurrentHashMap.newKeySet();
 
-    private final Map<UUID, String> previousRole = new ConcurrentHashMap<>();
+    // Tous les groupes LuckPerms du joueur AVANT le /staff (on les remet a la sortie).
+    private final Map<UUID, List<String>> previousRoles = new ConcurrentHashMap<>();
     private final Set<UUID> staffMembers = ConcurrentHashMap.newKeySet();
     private boolean roleEnabled = true;
     private boolean luckPermsPresent = false;
@@ -236,48 +237,72 @@ public class StaffMode extends LoadedPlugin implements Listener {
         catch (Throwable t) { return false; }
     }
 
-    private String getPrimaryGroup(Player p) {
+    private void lpRun(String args) {
+        try {
+            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "lp " + args);
+        } catch (Throwable t) {
+            getLogger().warning("[StaffMode] commande LuckPerms KO (" + args + ") : " + t.getMessage());
+        }
+    }
+
+    /**
+     * Lit la liste COMPLETE des groupes LuckPerms directement attribues au joueur
+     * (pas seulement le "groupe principal"). Ex: [admin, default].
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> getParentGroups(Player p) {
         try {
             Object lp = Class.forName("net.luckperms.api.LuckPermsProvider").getMethod("get").invoke(null);
             Object um = lp.getClass().getMethod("getUserManager").invoke(lp);
             Object user = um.getClass().getMethod("getUser", UUID.class).invoke(um, p.getUniqueId());
             if (user == null) return null;
-            Object grp = user.getClass().getMethod("getPrimaryGroup").invoke(user);
-            return grp != null ? grp.toString() : null;
-        } catch (Throwable t) { return null; }
-    }
-
-    private void setRole(Player p, String group) {
-        if (group == null || group.isEmpty()) return;
-        try {
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(),
-                    "lp user " + p.getUniqueId() + " parent set " + group);
+            Object nodes = user.getClass().getMethod("getNodes").invoke(user);
+            List<String> groups = new ArrayList<>();
+            for (Object node : (Iterable<Object>) nodes) {
+                Object key = node.getClass().getMethod("getKey").invoke(node);
+                if (key instanceof String k && k.startsWith("group.")) {
+                    String g = k.substring("group.".length());
+                    if (!g.isEmpty() && !groups.contains(g)) groups.add(g);
+                }
+            }
+            return groups;
         } catch (Throwable t) {
-            getLogger().warning("[StaffMode] changement de role KO pour " + p.getName() + " : " + t.getMessage());
+            getLogger().warning("[StaffMode] lecture des groupes KO pour " + p.getName() + " : " + t);
+            return null;
         }
     }
 
-    /** Entree en staff : on memorise sur le disque le role actuel (pour pouvoir le rendre plus tard). */
+    /** Remet EXACTEMENT la liste de groupes fournie (efface les groupes actuels puis les rajoute). */
+    private void restoreParentGroups(Player p, List<String> groups) {
+        if (groups == null || groups.isEmpty()) return;
+        UUID u = p.getUniqueId();
+        lpRun("user " + u + " parent clear");
+        for (String g : groups) {
+            if (g != null && !g.isEmpty()) lpRun("user " + u + " parent add " + g);
+        }
+    }
+
+    /** Entree en staff : on memorise sur le disque TOUS les groupes du joueur (pour les rendre plus tard). */
     private void applyRoleOnEnter(Player p) {
         if (!roleEnabled || !luckPermsPresent) return;
-        String current = getPrimaryGroup(p);
-        if (current != null && !current.isEmpty()) {
-            previousRole.put(p.getUniqueId(), current);
+        List<String> groups = getParentGroups(p);
+        if (groups != null && !groups.isEmpty()) {
+            previousRoles.put(p.getUniqueId(), groups);
             persist(); // ecrit tout de suite sur le disque -> survit meme a un crash serveur.
         } else {
-            getLogger().warning("[StaffMode] role actuel introuvable pour " + p.getName()
+            getLogger().warning("[StaffMode] groupes introuvables pour " + p.getName()
                     + " -> rien memorise (LuckPerms pas encore charge ?).");
         }
     }
 
-    /** Sortie de staff : on remet le role memorise avant le /staff. Sinon on ne touche a rien. */
+    /** Sortie de staff : on remet TOUS les groupes memorises avant le /staff. Sinon on ne touche a rien. */
     private void applyRoleOnExit(Player p) {
         if (!roleEnabled || !luckPermsPresent) return;
-        String prev = previousRole.remove(p.getUniqueId());
-        if (prev != null && !prev.isEmpty()) {
-            setRole(p, prev);
+        List<String> groups = previousRoles.remove(p.getUniqueId());
+        if (groups != null && !groups.isEmpty()) {
+            restoreParentGroups(p, groups);
         } else {
-            getLogger().info("[StaffMode] aucun role memorise pour " + p.getName()
+            getLogger().info("[StaffMode] aucun groupe memorise pour " + p.getName()
                     + " -> role laisse tel quel (rien ecrase).");
         }
         persist();
@@ -926,11 +951,11 @@ public class StaffMode extends LoadedPlugin implements Listener {
     private void restoreFromPending(Player p) {
         UUID u = p.getUniqueId();
 
-        // Si un role avait ete memorise mais pas encore remis (ex: crash pendant le mode
-        // staff), on le remet ici a la reconnexion.
+        // Si des groupes avaient ete memorises mais pas encore remis (ex: crash pendant le
+        // mode staff), on les remet ici a la reconnexion.
         if (roleEnabled && luckPermsPresent) {
-            String prevRole = previousRole.remove(u);
-            if (prevRole != null && !prevRole.isEmpty()) setRole(p, prevRole);
+            List<String> prevGroups = previousRoles.remove(u);
+            if (prevGroups != null && !prevGroups.isEmpty()) restoreParentGroups(p, prevGroups);
         }
 
         ItemStack[] inv = savedInv.get(u), armor = savedArmor.get(u);
@@ -1005,7 +1030,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     private void loadPending() {
         savedInv.clear(); savedArmor.clear(); savedOff.clear(); pendingRestore.clear();
-        previousRole.clear(); staffMembers.clear();
+        previousRoles.clear(); staffMembers.clear();
         if (file == null || !file.exists()) return;
         YamlConfiguration cfg = YamlConfiguration.loadConfiguration(file);
 
@@ -1037,8 +1062,18 @@ public class StaffMode extends LoadedPlugin implements Listener {
             for (String key : rs.getKeys(false)) {
                 try {
                     UUID u = UUID.fromString(key);
-                    String role = cfg.getString("roles." + key);
-                    if (role != null && !role.isEmpty()) previousRole.put(u, role);
+                    List<String> groups = cfg.getStringList("roles." + key);
+                    if (groups != null && !groups.isEmpty()) {
+                        previousRoles.put(u, new ArrayList<>(groups));
+                    } else {
+                        // Compat ancien format (un seul groupe stocke en String).
+                        String single = cfg.getString("roles." + key);
+                        if (single != null && !single.isEmpty()) {
+                            List<String> one = new ArrayList<>();
+                            one.add(single);
+                            previousRoles.put(u, one);
+                        }
+                    }
                 } catch (Throwable t) { getLogger().warning("[StaffMode] role KO pour " + key + " : " + t); }
             }
         }
@@ -1063,7 +1098,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
             if (savedOff.get(u) != null)   cfg.set(path + ".offhand", toBase64Safe(new ItemStack[]{ savedOff.get(u) }));
         }
 
-        for (Map.Entry<UUID, String> e : previousRole.entrySet()) cfg.set("roles." + e.getKey(), e.getValue());
+        for (Map.Entry<UUID, List<String>> e : previousRoles.entrySet()) cfg.set("roles." + e.getKey(), e.getValue());
 
         List<String> sm = new ArrayList<>();
         for (UUID u : staffMembers) sm.add(u.toString());
