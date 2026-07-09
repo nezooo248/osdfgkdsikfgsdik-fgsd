@@ -56,6 +56,13 @@ import java.util.concurrent.ConcurrentHashMap;
  *   /survie                -> survie.
  *   /inventorybackup <joueur> [numero|latest|undo]  (OP) -> restaure un inventaire sauvegarde.
  *
+ * GESTION DES ROLES (LuckPerms) :
+ *   /staff (entree) -> sauvegarde TOUS les grades du joueur, puis le passe en grade
+ *                      "joueur" (role.player-group) pour etre discret pendant le service.
+ *   /staff (sortie) -> lui remet ses vrais grades d'avant le /staff. Les grades gagnes
+ *                      pendant le service (ex: grade boutique achete) sont conserves.
+ *   Ex : tu es "admin", /staff -> tu es "joueur", /staff -> tu es "admin".
+ *
  * BACKUP UNIVERSEL : toutes les X secondes, l'inventaire COMPLET de chaque joueur en
  * ligne (inventaire + armure + main gauche + ender chest) est serialise en base64 et
  * sauvegarde sur le disque, avec un historique par joueur. Un backup est aussi pris a
@@ -79,10 +86,11 @@ public class StaffMode extends LoadedPlugin implements Listener {
     private final Map<UUID, ItemStack>   savedOff   = new ConcurrentHashMap<>();
     private final Set<UUID> pendingRestore = ConcurrentHashMap.newKeySet();
 
-    private final Map<UUID, String> previousRole = new ConcurrentHashMap<>();
+    // Tous les groupes LuckPerms du joueur AVANT le /staff (on les remet a la sortie).
+    private final Map<UUID, List<String>> previousRoles = new ConcurrentHashMap<>();
     private final Set<UUID> staffMembers = ConcurrentHashMap.newKeySet();
     private boolean roleEnabled = true;
-    private String  defaultRole = "default";
+    private String  playerGroup = "joueur"; // grade "joueur" applique pendant le mode staff (config).
     private boolean luckPermsPresent = false;
 
     // Backup universel.
@@ -183,10 +191,16 @@ public class StaffMode extends LoadedPlugin implements Listener {
             "# ============================================\n" +
             "\n" +
             "role:\n" +
-            "  # true  = le plugin gere le role (LuckPerms) automatiquement.\n" +
-            "  # false = le plugin ne touche jamais aux roles.\n" +
+            "  # true  = /staff te passe en grade 'joueur' (discret), et te rend TES grades\n" +
+            "  #         d'origine quand tu refais /staff.\n" +
+            "  # false = le plugin ne touche jamais aux grades.\n" +
             "  enabled: true\n" +
-            "  default: \"default\"\n" +
+            "  # Grade 'joueur' applique pendant le mode staff (pour etre discret en service).\n" +
+            "  # Mets le nom EXACT de ton groupe joueur/default LuckPerms.\n" +
+            "  # A la sortie, chaque staff retrouve ses vrais grades (peu importe lesquels),\n" +
+            "  # et garde en plus un eventuel grade achete pendant le service.\n" +
+            "  # Laisse vide (\"\") pour ne pas changer de grade (juste sauvegarder/restaurer).\n" +
+            "  player-group: \"joueur\"\n" +
             "\n" +
             "backup:\n" +
             "  # Sauvegarde automatique de TOUS les inventaires sur le disque.\n" +
@@ -197,7 +211,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
             "  max-per-player: 30\n";
 
     private void loadConfig() {
-        roleEnabled = true; defaultRole = "default";
+        roleEnabled = true; playerGroup = "joueur";
         backupEnabled = true; backupIntervalSeconds = 300; backupMaxPerPlayer = 30;
         try {
             File dir = configFile.getParentFile();
@@ -209,13 +223,13 @@ public class StaffMode extends LoadedPlugin implements Listener {
             YamlConfiguration cfg = YamlConfiguration.loadConfiguration(configFile);
             boolean changed = false;
             if (!cfg.contains("role.enabled"))           { cfg.set("role.enabled", true); changed = true; }
-            if (!cfg.contains("role.default"))           { cfg.set("role.default", "default"); changed = true; }
+            if (!cfg.contains("role.player-group"))       { cfg.set("role.player-group", "joueur"); changed = true; }
             if (!cfg.contains("backup.enabled"))         { cfg.set("backup.enabled", true); changed = true; }
             if (!cfg.contains("backup.interval-seconds")) { cfg.set("backup.interval-seconds", 300); changed = true; }
             if (!cfg.contains("backup.max-per-player"))  { cfg.set("backup.max-per-player", 30); changed = true; }
 
             roleEnabled = cfg.getBoolean("role.enabled", true);
-            defaultRole = cfg.getString("role.default", "default");
+            playerGroup = cfg.getString("role.player-group", "joueur");
             backupEnabled = cfg.getBoolean("backup.enabled", true);
             backupIntervalSeconds = Math.max(10, cfg.getInt("backup.interval-seconds", 300));
             backupMaxPerPlayer = Math.max(3, cfg.getInt("backup.max-per-player", 30));
@@ -233,6 +247,42 @@ public class StaffMode extends LoadedPlugin implements Listener {
         catch (Throwable t) { return false; }
     }
 
+    private void lpRun(String args) {
+        try {
+            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "lp " + args);
+        } catch (Throwable t) {
+            getLogger().warning("[StaffMode] commande LuckPerms KO (" + args + ") : " + t.getMessage());
+        }
+    }
+
+    /**
+     * Lit la liste COMPLETE des groupes LuckPerms directement attribues au joueur
+     * (pas seulement le "groupe principal"). Ex: [admin, default].
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> getParentGroups(Player p) {
+        try {
+            Object lp = Class.forName("net.luckperms.api.LuckPermsProvider").getMethod("get").invoke(null);
+            Object um = lp.getClass().getMethod("getUserManager").invoke(lp);
+            Object user = um.getClass().getMethod("getUser", UUID.class).invoke(um, p.getUniqueId());
+            if (user == null) return null;
+            Object nodes = user.getClass().getMethod("getNodes").invoke(user);
+            List<String> groups = new ArrayList<>();
+            for (Object node : (Iterable<Object>) nodes) {
+                Object key = node.getClass().getMethod("getKey").invoke(node);
+                if (key instanceof String k && k.startsWith("group.")) {
+                    String g = k.substring("group.".length());
+                    if (!g.isEmpty() && !groups.contains(g)) groups.add(g);
+                }
+            }
+            return groups;
+        } catch (Throwable t) {
+            getLogger().warning("[StaffMode] lecture des groupes KO pour " + p.getName() + " : " + t);
+            return null;
+        }
+    }
+
+    /** Grade PRINCIPAL LuckPerms (celui qui pilote l'affichage du grade/prefix). */
     private String getPrimaryGroup(Player p) {
         try {
             Object lp = Class.forName("net.luckperms.api.LuckPermsProvider").getMethod("get").invoke(null);
@@ -244,29 +294,80 @@ public class StaffMode extends LoadedPlugin implements Listener {
         } catch (Throwable t) { return null; }
     }
 
-    private void setRole(Player p, String group) {
-        if (group == null || group.isEmpty()) return;
-        try {
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(),
-                    "lp user " + p.getUniqueId() + " parent set " + group);
-        } catch (Throwable t) {
-            getLogger().warning("[StaffMode] changement de role KO pour " + p.getName() + " : " + t.getMessage());
+    /**
+     * Remet au joueur ses grades d'avant le /staff, EN REMETTANT SON GRADE PRINCIPAL
+     * (donc l'affichage revient). N'efface RIEN : on rajoute les grades memorises, on
+     * enleve juste le grade "joueur" force, et on garde les grades gagnes pendant le
+     * service (ex: grade boutique achete).
+     *
+     * saved[0] = grade principal, saved[1..] = autres grades.
+     */
+    private void restoreRealGrades(Player p, List<String> saved) {
+        if (saved == null || saved.isEmpty()) return;
+        UUID u = p.getUniqueId();
+        String mainGroup = saved.get(0);
+
+        // 1) On re-ajoute TOUS les grades memorises (sans rien effacer d'abord).
+        for (String g : saved) {
+            if (g != null && !g.isEmpty()) lpRun("user " + u + " parent add " + g);
+        }
+        // 2) On enleve le grade "joueur" force par le mode staff (sauf s'il fait vraiment
+        //    partie des grades d'origine du joueur).
+        if (playerGroup != null && !playerGroup.isEmpty() && !containsIgnoreCase(saved, playerGroup)) {
+            lpRun("user " + u + " parent remove " + playerGroup);
+        }
+        // 3) On remet le grade PRINCIPAL pour que l'affichage revienne.
+        if (mainGroup != null && !mainGroup.isEmpty()) {
+            lpRun("user " + u + " parent switchprimarygroup " + mainGroup);
         }
     }
 
+    private boolean containsIgnoreCase(List<String> list, String v) {
+        if (list == null || v == null) return false;
+        for (String s : list) if (v.equalsIgnoreCase(s)) return true;
+        return false;
+    }
+
+    /** Entree en staff : on memorise le grade PRINCIPAL + tous les grades, puis on passe "joueur". */
     private void applyRoleOnEnter(Player p) {
         if (!roleEnabled || !luckPermsPresent) return;
-        String prev = previousRole.get(p.getUniqueId());
-        if (prev != null && !prev.isEmpty()) setRole(p, prev);
+        List<String> parents = getParentGroups(p);
+        if (parents == null || parents.isEmpty()) {
+            // On ne connait pas les grades actuels -> on NE change RIEN (pour ne rien perdre).
+            getLogger().warning("[StaffMode] grades introuvables pour " + p.getName()
+                    + " -> grade NON change (LuckPerms pas encore charge ?).");
+            return;
+        }
+        // On stocke le grade principal en PREMIER, puis tous les autres grades.
+        String primary = getPrimaryGroup(p);
+        List<String> ordered = new ArrayList<>();
+        if (primary != null && !primary.isEmpty()) ordered.add(primary);
+        for (String g : parents) if (!ordered.contains(g)) ordered.add(g);
+        if (ordered.isEmpty()) {
+            getLogger().warning("[StaffMode] grade principal introuvable pour " + p.getName()
+                    + " -> grade NON change.");
+            return;
+        }
+
+        previousRoles.put(p.getUniqueId(), ordered);
+        persist();
+
+        // On passe le joueur en grade "joueur" pour qu'il soit discret pendant le service.
+        if (playerGroup != null && !playerGroup.isEmpty()) {
+            lpRun("user " + p.getUniqueId() + " parent set " + playerGroup);
+        }
     }
 
+    /** Sortie de staff : on remet ses vrais grades d'avant le /staff. Sinon on ne touche a rien. */
     private void applyRoleOnExit(Player p) {
         if (!roleEnabled || !luckPermsPresent) return;
-        String current = getPrimaryGroup(p);
-        if (current != null && !current.equalsIgnoreCase(defaultRole)) {
-            previousRole.put(p.getUniqueId(), current);
+        List<String> groups = previousRoles.remove(p.getUniqueId());
+        if (groups != null && !groups.isEmpty()) {
+            restoreRealGrades(p, groups);
+        } else {
+            getLogger().info("[StaffMode] aucun grade memorise pour " + p.getName()
+                    + " -> grade laisse tel quel (rien ecrase).");
         }
-        setRole(p, defaultRole);
         persist();
     }
 
@@ -912,6 +1013,14 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     private void restoreFromPending(Player p) {
         UUID u = p.getUniqueId();
+
+        // Si des groupes avaient ete memorises mais pas encore remis (ex: crash pendant le
+        // mode staff), on les remet ici a la reconnexion.
+        if (roleEnabled && luckPermsPresent) {
+            List<String> prevGroups = previousRoles.remove(u);
+            if (prevGroups != null && !prevGroups.isEmpty()) restoreRealGrades(p, prevGroups);
+        }
+
         ItemStack[] inv = savedInv.get(u), armor = savedArmor.get(u);
         ItemStack off = savedOff.get(u);
 
@@ -984,7 +1093,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     private void loadPending() {
         savedInv.clear(); savedArmor.clear(); savedOff.clear(); pendingRestore.clear();
-        previousRole.clear(); staffMembers.clear();
+        previousRoles.clear(); staffMembers.clear();
         if (file == null || !file.exists()) return;
         YamlConfiguration cfg = YamlConfiguration.loadConfiguration(file);
 
@@ -1016,8 +1125,18 @@ public class StaffMode extends LoadedPlugin implements Listener {
             for (String key : rs.getKeys(false)) {
                 try {
                     UUID u = UUID.fromString(key);
-                    String role = cfg.getString("roles." + key);
-                    if (role != null && !role.isEmpty()) previousRole.put(u, role);
+                    List<String> groups = cfg.getStringList("roles." + key);
+                    if (groups != null && !groups.isEmpty()) {
+                        previousRoles.put(u, new ArrayList<>(groups));
+                    } else {
+                        // Compat ancien format (un seul groupe stocke en String).
+                        String single = cfg.getString("roles." + key);
+                        if (single != null && !single.isEmpty()) {
+                            List<String> one = new ArrayList<>();
+                            one.add(single);
+                            previousRoles.put(u, one);
+                        }
+                    }
                 } catch (Throwable t) { getLogger().warning("[StaffMode] role KO pour " + key + " : " + t); }
             }
         }
@@ -1042,7 +1161,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
             if (savedOff.get(u) != null)   cfg.set(path + ".offhand", toBase64Safe(new ItemStack[]{ savedOff.get(u) }));
         }
 
-        for (Map.Entry<UUID, String> e : previousRole.entrySet()) cfg.set("roles." + e.getKey(), e.getValue());
+        for (Map.Entry<UUID, List<String>> e : previousRoles.entrySet()) cfg.set("roles." + e.getKey(), e.getValue());
 
         List<String> sm = new ArrayList<>();
         for (UUID u : staffMembers) sm.add(u.toString());
