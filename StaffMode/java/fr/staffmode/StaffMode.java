@@ -56,6 +56,13 @@ import java.util.concurrent.ConcurrentHashMap;
  *   /survie                -> survie.
  *   /inventorybackup <joueur> [numero|latest|undo]  (OP) -> restaure un inventaire sauvegarde.
  *
+ * GESTION DES ROLES (LuckPerms) :
+ *   /staff (entree) -> memorise sur le disque le role actuel du joueur.
+ *   /staff (sortie) -> remet au joueur le role memorise avant le /staff.
+ *   Le plugin ne choisit AUCUN grade staff : il se contente de sauvegarder ton role
+ *   d'avant et de te le rendre. Ex : tu es "empereur", tu fais /staff (tu passes sur
+ *   un de tes 5 grades staff comme tu veux), tu refais /staff -> tu redeviens "empereur".
+ *
  * BACKUP UNIVERSEL : toutes les X secondes, l'inventaire COMPLET de chaque joueur en
  * ligne (inventaire + armure + main gauche + ender chest) est serialise en base64 et
  * sauvegarde sur le disque, avec un historique par joueur. Un backup est aussi pris a
@@ -82,7 +89,6 @@ public class StaffMode extends LoadedPlugin implements Listener {
     private final Map<UUID, String> previousRole = new ConcurrentHashMap<>();
     private final Set<UUID> staffMembers = ConcurrentHashMap.newKeySet();
     private boolean roleEnabled = true;
-    private String  defaultRole = "default";
     private boolean luckPermsPresent = false;
 
     // Backup universel.
@@ -183,10 +189,9 @@ public class StaffMode extends LoadedPlugin implements Listener {
             "# ============================================\n" +
             "\n" +
             "role:\n" +
-            "  # true  = le plugin gere le role (LuckPerms) automatiquement.\n" +
+            "  # true  = le plugin sauvegarde ton role AVANT le /staff et te le rend a la sortie.\n" +
             "  # false = le plugin ne touche jamais aux roles.\n" +
             "  enabled: true\n" +
-            "  default: \"default\"\n" +
             "\n" +
             "backup:\n" +
             "  # Sauvegarde automatique de TOUS les inventaires sur le disque.\n" +
@@ -197,7 +202,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
             "  max-per-player: 30\n";
 
     private void loadConfig() {
-        roleEnabled = true; defaultRole = "default";
+        roleEnabled = true;
         backupEnabled = true; backupIntervalSeconds = 300; backupMaxPerPlayer = 30;
         try {
             File dir = configFile.getParentFile();
@@ -209,13 +214,11 @@ public class StaffMode extends LoadedPlugin implements Listener {
             YamlConfiguration cfg = YamlConfiguration.loadConfiguration(configFile);
             boolean changed = false;
             if (!cfg.contains("role.enabled"))           { cfg.set("role.enabled", true); changed = true; }
-            if (!cfg.contains("role.default"))           { cfg.set("role.default", "default"); changed = true; }
             if (!cfg.contains("backup.enabled"))         { cfg.set("backup.enabled", true); changed = true; }
             if (!cfg.contains("backup.interval-seconds")) { cfg.set("backup.interval-seconds", 300); changed = true; }
             if (!cfg.contains("backup.max-per-player"))  { cfg.set("backup.max-per-player", 30); changed = true; }
 
             roleEnabled = cfg.getBoolean("role.enabled", true);
-            defaultRole = cfg.getString("role.default", "default");
             backupEnabled = cfg.getBoolean("backup.enabled", true);
             backupIntervalSeconds = Math.max(10, cfg.getInt("backup.interval-seconds", 300));
             backupMaxPerPlayer = Math.max(3, cfg.getInt("backup.max-per-player", 30));
@@ -254,19 +257,29 @@ public class StaffMode extends LoadedPlugin implements Listener {
         }
     }
 
+    /** Entree en staff : on memorise sur le disque le role actuel (pour pouvoir le rendre plus tard). */
     private void applyRoleOnEnter(Player p) {
         if (!roleEnabled || !luckPermsPresent) return;
-        String prev = previousRole.get(p.getUniqueId());
-        if (prev != null && !prev.isEmpty()) setRole(p, prev);
+        String current = getPrimaryGroup(p);
+        if (current != null && !current.isEmpty()) {
+            previousRole.put(p.getUniqueId(), current);
+            persist(); // ecrit tout de suite sur le disque -> survit meme a un crash serveur.
+        } else {
+            getLogger().warning("[StaffMode] role actuel introuvable pour " + p.getName()
+                    + " -> rien memorise (LuckPerms pas encore charge ?).");
+        }
     }
 
+    /** Sortie de staff : on remet le role memorise avant le /staff. Sinon on ne touche a rien. */
     private void applyRoleOnExit(Player p) {
         if (!roleEnabled || !luckPermsPresent) return;
-        String current = getPrimaryGroup(p);
-        if (current != null && !current.equalsIgnoreCase(defaultRole)) {
-            previousRole.put(p.getUniqueId(), current);
+        String prev = previousRole.remove(p.getUniqueId());
+        if (prev != null && !prev.isEmpty()) {
+            setRole(p, prev);
+        } else {
+            getLogger().info("[StaffMode] aucun role memorise pour " + p.getName()
+                    + " -> role laisse tel quel (rien ecrase).");
         }
-        setRole(p, defaultRole);
         persist();
     }
 
@@ -912,6 +925,14 @@ public class StaffMode extends LoadedPlugin implements Listener {
 
     private void restoreFromPending(Player p) {
         UUID u = p.getUniqueId();
+
+        // Si un role avait ete memorise mais pas encore remis (ex: crash pendant le mode
+        // staff), on le remet ici a la reconnexion.
+        if (roleEnabled && luckPermsPresent) {
+            String prevRole = previousRole.remove(u);
+            if (prevRole != null && !prevRole.isEmpty()) setRole(p, prevRole);
+        }
+
         ItemStack[] inv = savedInv.get(u), armor = savedArmor.get(u);
         ItemStack off = savedOff.get(u);
 
