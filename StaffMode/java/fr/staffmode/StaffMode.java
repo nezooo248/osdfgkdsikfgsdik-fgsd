@@ -282,44 +282,77 @@ public class StaffMode extends LoadedPlugin implements Listener {
         }
     }
 
+    /** Grade PRINCIPAL LuckPerms (celui qui pilote l'affichage du grade/prefix). */
+    private String getPrimaryGroup(Player p) {
+        try {
+            Object lp = Class.forName("net.luckperms.api.LuckPermsProvider").getMethod("get").invoke(null);
+            Object um = lp.getClass().getMethod("getUserManager").invoke(lp);
+            Object user = um.getClass().getMethod("getUser", UUID.class).invoke(um, p.getUniqueId());
+            if (user == null) return null;
+            Object grp = user.getClass().getMethod("getPrimaryGroup").invoke(user);
+            return grp != null ? grp.toString() : null;
+        } catch (Throwable t) { return null; }
+    }
+
     /**
-     * Remet au joueur ses grades d'origine (sauvegardes avant le /staff) et garde en plus
-     * les grades gagnes pendant le service (ex: grade boutique achete), sauf le grade
-     * "joueur" force par le mode staff.
+     * Remet au joueur ses grades d'avant le /staff, EN REMETTANT SON GRADE PRINCIPAL
+     * (donc l'affichage revient). Garde aussi les grades gagnes pendant le service
+     * (ex: grade boutique achete), sauf le grade "joueur" force par le mode staff.
+     *
+     * saved[0] = grade principal, saved[1..] = autres grades.
      */
-    private void restoreRealGrades(Player p, List<String> savedOriginals) {
-        if (savedOriginals == null || savedOriginals.isEmpty()) return;
-        java.util.LinkedHashSet<String> target = new java.util.LinkedHashSet<>();
-        for (String g : savedOriginals) if (g != null && !g.isEmpty()) target.add(g);
-        // On conserve les grades ajoutes pendant le service, sauf le grade "joueur" force.
+    private void restoreRealGrades(Player p, List<String> saved) {
+        if (saved == null || saved.isEmpty()) return;
+        UUID u = p.getUniqueId();
+
+        String mainGroup = saved.get(0);
+        java.util.LinkedHashSet<String> others = new java.util.LinkedHashSet<>();
+        for (int i = 1; i < saved.size(); i++) {
+            String g = saved.get(i);
+            if (g != null && !g.isEmpty() && !g.equalsIgnoreCase(mainGroup)) others.add(g);
+        }
+        // On conserve les grades gagnes pendant le service, sauf le grade "joueur" force.
         List<String> current = getParentGroups(p);
         if (current != null) {
             for (String g : current) {
                 if (g != null && !g.isEmpty()
-                        && (playerGroup == null || !g.equalsIgnoreCase(playerGroup))) {
-                    target.add(g);
+                        && (playerGroup == null || !g.equalsIgnoreCase(playerGroup))
+                        && !g.equalsIgnoreCase(mainGroup)) {
+                    others.add(g);
                 }
             }
         }
-        UUID u = p.getUniqueId();
-        lpRun("user " + u + " parent clear");
-        for (String g : target) lpRun("user " + u + " parent add " + g);
+        // 1) parent set = remet le grade PRINCIPAL (et nettoie les autres) -> l'affichage revient.
+        lpRun("user " + u + " parent set " + mainGroup);
+        // 2) On rajoute tous les autres grades (permissions + grade boutique conserve).
+        for (String g : others) lpRun("user " + u + " parent add " + g);
     }
 
-    /** Entree en staff : on memorise TOUS les grades du joueur, puis on le passe en grade "joueur". */
+    /** Entree en staff : on memorise le grade PRINCIPAL + tous les grades, puis on passe "joueur". */
     private void applyRoleOnEnter(Player p) {
         if (!roleEnabled || !luckPermsPresent) return;
-        List<String> groups = getParentGroups(p);
-        if (groups == null || groups.isEmpty()) {
+        List<String> parents = getParentGroups(p);
+        if (parents == null || parents.isEmpty()) {
             // On ne connait pas les grades actuels -> on NE change RIEN (pour ne rien perdre).
             getLogger().warning("[StaffMode] grades introuvables pour " + p.getName()
                     + " -> grade NON change (LuckPerms pas encore charge ?).");
             return;
         }
-        // 1) On sauvegarde d'abord tous les grades actuels (sur le disque tout de suite).
-        previousRoles.put(p.getUniqueId(), groups);
+        // On stocke le grade principal en PREMIER, puis tous les autres grades.
+        String primary = getPrimaryGroup(p);
+        List<String> ordered = new ArrayList<>();
+        if (primary != null && !primary.isEmpty()) ordered.add(primary);
+        for (String g : parents) if (!ordered.contains(g)) ordered.add(g);
+        if (ordered.isEmpty()) {
+            getLogger().warning("[StaffMode] grade principal introuvable pour " + p.getName()
+                    + " -> grade NON change.");
+            return;
+        }
+
+        previousRoles.put(p.getUniqueId(), ordered);
         persist();
-        // 2) On passe le joueur en grade "joueur" pour qu'il soit discret pendant le service.
+
+        // On passe le joueur en grade "joueur" pour qu'il soit discret pendant le service.
         if (playerGroup != null && !playerGroup.isEmpty()) {
             lpRun("user " + p.getUniqueId() + " parent set " + playerGroup);
         }
