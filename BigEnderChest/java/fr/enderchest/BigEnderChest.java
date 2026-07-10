@@ -9,6 +9,8 @@ import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.Sound;
 import org.bukkit.block.Block;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -42,14 +44,15 @@ import java.util.UUID;
  *
  *  - Clic droit sur un bloc Ender Chest -> ouvre le menu 54 slots.
  *  - /enderchest (alias /ec)            -> ouvre ton menu 54 slots.
+ *  - /ec JOUEUR (ou /enderchest JOUEUR) -> ouvre l'ender chest d'un autre (perm admin.ec.see).
  *  - Sauvegarde a la fermeture, a la deconnexion et a l'arret du serveur.
  *
- * Tout le monde peut l'utiliser.
+ * Tout le monde peut utiliser son propre ender chest.
  */
 public class BigEnderChest extends LoadedPlugin implements Listener {
 
     private static final int SIZE = 54; // double coffre
-    private static final String PERM_OTHERS = "staff.ec"; // pour voir l'ender chest d'un autre
+    private static final String PERM_OTHERS = "admin.ec.see"; // pour voir l'ender chest d'un autre
     private static final Component TITLE =
             Component.text("Coffre de l'Ender", NamedTextColor.DARK_PURPLE, TextDecoration.BOLD);
 
@@ -64,43 +67,49 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
         if (!dataFolder.exists()) dataFolder.mkdirs();
 
         registerListener(this);
-        registerCommand("enderchest", (sender, cmd, label, args) -> {
-            if (!(sender instanceof Player p)) {
-                sender.sendMessage(Component.text("Commande reservee aux joueurs.", NamedTextColor.RED));
-                return true;
-            }
-            if (args.length == 0) {
-                open(p); // son propre ender chest
-                return true;
-            }
-            // Ouvrir l'ender chest d'un autre joueur : reserve a staff.ec
-            if (!p.hasPermission(PERM_OTHERS)) {
-                p.sendMessage(Component.text("Tu n'as pas la permission " + PERM_OTHERS + ".", NamedTextColor.RED));
-                return true;
-            }
-            String targetName = args[0];
-            Player online = Bukkit.getPlayerExact(targetName);
-            UUID targetId;
-            String resolvedName;
-            if (online != null) {
-                targetId = online.getUniqueId();
-                resolvedName = online.getName();
-            } else {
-                OfflinePlayer off = Bukkit.getOfflinePlayer(targetName);
-                if (off == null || off.getUniqueId() == null
-                        || (!off.hasPlayedBefore() && !off.isOnline())) {
-                    p.sendMessage(Component.text("Joueur introuvable : " + targetName, NamedTextColor.RED));
-                    return true;
-                }
-                targetId = off.getUniqueId();
-                resolvedName = off.getName() != null ? off.getName() : targetName;
-            }
-            open(p, targetId, resolvedName, false);
-            p.sendMessage(Component.text("Ouverture de l'ender chest de " + resolvedName + ".", NamedTextColor.LIGHT_PURPLE));
-            return true;
-        });
+
+        // Le meme handler pour /enderchest et son alias /ec.
+        registerCommand("enderchest", this::handleCommand);
+        registerCommand("ec", this::handleCommand);
 
         getLogger().info("BigEnderChest active.");
+    }
+
+    /** Logique commune a /enderchest et /ec. */
+    private boolean handleCommand(CommandSender sender, Command cmd, String label, String[] args) {
+        if (!(sender instanceof Player p)) {
+            sender.sendMessage(Component.text("Commande reservee aux joueurs.", NamedTextColor.RED));
+            return true;
+        }
+        if (args.length == 0) {
+            open(p); // son propre ender chest
+            return true;
+        }
+        // Ouvrir l'ender chest d'un autre joueur : reserve a admin.ec.see
+        if (!p.hasPermission(PERM_OTHERS)) {
+            p.sendMessage(Component.text("Tu n'as pas la permission " + PERM_OTHERS + ".", NamedTextColor.RED));
+            return true;
+        }
+        String targetName = args[0];
+        Player online = Bukkit.getPlayerExact(targetName);
+        UUID targetId;
+        String resolvedName;
+        if (online != null) {
+            targetId = online.getUniqueId();
+            resolvedName = online.getName();
+        } else {
+            OfflinePlayer off = Bukkit.getOfflinePlayer(targetName);
+            if (off == null || off.getUniqueId() == null
+                    || (!off.hasPlayedBefore() && !off.isOnline())) {
+                p.sendMessage(Component.text("Joueur introuvable : " + targetName, NamedTextColor.RED));
+                return true;
+            }
+            targetId = off.getUniqueId();
+            resolvedName = off.getName() != null ? off.getName() : targetName;
+        }
+        open(p, targetId, resolvedName, false);
+        p.sendMessage(Component.text("Ouverture de l'ender chest de " + resolvedName + ".", NamedTextColor.LIGHT_PURPLE));
+        return true;
     }
 
     @Override
