@@ -53,6 +53,7 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
 
     private static final int SIZE = 54; // double coffre
     private static final String PERM_OTHERS = "admin.ec.see"; // pour voir l'ender chest d'un autre
+    private static final String PERM_BLOCK = "bspdpsi.edd"; // si le joueur l'a -> il ne peut PAS voir l'ender chest
     private static final Component TITLE =
             Component.text("Coffre de l'Ender", NamedTextColor.DARK_PURPLE, TextDecoration.BOLD);
 
@@ -150,6 +151,13 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
 
     /** Ouvre le menu 54 slots de 'owner' pour 'viewer' (le contenu est charge depuis le disque). */
     private void open(Player viewer, UUID owner, String ownerName, boolean self) {
+        // Blocage : ce joueur n'a pas le droit de voir d'ender chest.
+        if (viewer.hasPermission(PERM_BLOCK)) {
+            viewer.sendMessage(Component.text("Tu ne peux pas ouvrir l'ender chest.", NamedTextColor.RED));
+            viewer.playSound(viewer.getLocation(), Sound.ENTITY_VILLAGER_NO, 1f, 1f);
+            return;
+        }
+
         EnderHolder holder = new EnderHolder(owner);
         Component title = self ? TITLE
                 : Component.text("Ender de " + ownerName, NamedTextColor.DARK_PURPLE, TextDecoration.BOLD);
