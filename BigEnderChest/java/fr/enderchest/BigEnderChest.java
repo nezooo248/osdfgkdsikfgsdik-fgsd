@@ -19,7 +19,9 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
+import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerInteractEvent;
@@ -234,6 +236,36 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
     }
 
     // ===================== SAUVEGARDE =====================
+
+    // ---- Sauvegarde a CHAQUE mouvement : clic, prise, depot, drop ----
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onClick(InventoryClickEvent e) {
+        // Le menu du haut est-il un des notres ? (couvre aussi les shift-clic depuis l'inventaire perso)
+        if (e.getView().getTopInventory().getHolder() instanceof EnderHolder h) {
+            scheduleSave(h.owner, e.getView().getTopInventory());
+        }
+    }
+
+    // ---- Sauvegarde quand on GLISSE des objets (drag) ----
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDrag(InventoryDragEvent e) {
+        if (e.getView().getTopInventory().getHolder() instanceof EnderHolder h) {
+            scheduleSave(h.owner, e.getView().getTopInventory());
+        }
+    }
+
+    /**
+     * Sauvegarde au TICK SUIVANT : pendant le clic/drag, l'inventaire n'a pas encore
+     * ete mis a jour, donc on attend un tick pour enregistrer le contenu final.
+     */
+    private void scheduleSave(UUID owner, Inventory inv) {
+        try {
+            Bukkit.getScheduler().runTask((Plugin) getHost(),
+                    () -> saveContents(owner, inv.getContents()));
+        } catch (Throwable t) {
+            saveContents(owner, inv.getContents()); // repli immediat si pas de scheduler
+        }
+    }
 
     @EventHandler
     public void onClose(InventoryCloseEvent e) {
