@@ -173,7 +173,16 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
             return;
         }
 
-        // ANTI-DUP : si un inventaire de ce proprietaire est deja ouvert quelque part,
+        // ANTI-DUP : si le joueur a DEJA un ender chest ouvert (le sien ou celui d'un autre),
+        // on refuse d'en ouvrir un second. C'est ce qui empechait le dup via /ec : avoir deux
+        // fenetres du meme coffre ouvertes en meme temps.
+        Inventory current = topInventory(viewer);
+        if (current != null && current.getHolder() instanceof EnderHolder) {
+            viewer.sendMessage(Component.text("Tu as deja un ender chest ouvert.", NamedTextColor.RED));
+            return;
+        }
+
+        // Si un inventaire de ce proprietaire est deja ouvert quelque part,
         // on REUTILISE le meme objet (pas de rechargement disque). Sinon on en cree un.
         Inventory inv = live.get(owner);
         if (inv == null) {
@@ -279,9 +288,12 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
             p.playSound(p.getLocation(), Sound.BLOCK_ENDER_CHEST_CLOSE, 1f, 1f);
         }
 
-        // Si c'etait le DERNIER visiteur, on libere l'inventaire vivant.
-        // Pendant cet event, le joueur qui ferme est encore compte dans getViewers().
-        if (!hasOtherViewers(inv, e.getPlayer())) {
+        // ANTI-DUP : tant que le proprietaire est EN LIGNE, on GARDE l'inventaire vivant
+        // en memoire. On ne le relit donc jamais depuis le disque a la reouverture -> aucun
+        // risque de "vieux contenu" qui reapparait. On ne le libere que si le proprietaire
+        // est hors-ligne et qu'aucun autre visiteur ne le regarde.
+        boolean ownerOnline = Bukkit.getPlayer(h.owner) != null;
+        if (!ownerOnline && !hasOtherViewers(inv, e.getPlayer())) {
             live.remove(h.owner);
         }
     }
@@ -289,11 +301,19 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         Player p = e.getPlayer();
+
+        // 1) S'il regardait un ender chest (le sien ou celui d'un autre), on le sauvegarde.
         Inventory top = topInventory(p);
         if (top != null && top.getHolder() instanceof EnderHolder h) {
             saveContents(h.owner, top.getContents());
-            if (!hasOtherViewers(top, p)) {
-                live.remove(h.owner);
+        }
+
+        // 2) Il part : on libere SON propre inventaire vivant (apres l'avoir sauvegarde).
+        Inventory own = live.get(p.getUniqueId());
+        if (own != null) {
+            saveContents(p.getUniqueId(), own.getContents());
+            if (!hasOtherViewers(own, p)) {
+                live.remove(p.getUniqueId());
             }
         }
     }
@@ -339,8 +359,10 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
             cfg.set("contents", new ArrayList<>(Arrays.asList(contents)));
             if (!dataFolder.exists()) dataFolder.mkdirs();
             cfg.save(f);
-        } catch (IOException e) {
-            getLogger().warning("[BigEnderChest] sauvegarde KO pour " + u + " : " + e.getMessage());
+        } catch (Throwable e) {
+            // Throwable (pas seulement IOException) : certains items exotiques peuvent lever
+            // une erreur de serialisation qui, sinon, annulerait la sauvegarde en silence.
+            getLogger().warning("[BigEnderChest] sauvegarde KO pour " + u + " : " + e);
         }
     }
 
