@@ -12,6 +12,7 @@ import org.bukkit.block.Block;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -33,7 +34,9 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -47,6 +50,12 @@ import java.util.UUID;
  *  - /ec JOUEUR (ou /enderchest JOUEUR) -> ouvre l'ender chest d'un autre (perm admin.ec.see).
  *  - Sauvegarde a la fermeture, a la deconnexion et a l'arret du serveur.
  *
+ * ANTI-DUP : un SEUL inventaire vivant par joueur (partage entre tous les visiteurs).
+ * On ne recharge JAMAIS depuis le disque tant qu'une copie est ouverte, et on sauvegarde
+ * seulement quand le dernier visiteur ferme. Ca empeche la duplication qui arrivait quand
+ * on prenait un objet puis qu'on rouvrait (ou qu'un admin ouvrait en meme temps) avant la
+ * sauvegarde : la nouvelle copie rechargeait l'ancien contenu du fichier.
+ *
  * Tout le monde peut utiliser son propre ender chest.
  */
 public class BigEnderChest extends LoadedPlugin implements Listener {
@@ -58,6 +67,9 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
             Component.text("Coffre de l'Ender", NamedTextColor.DARK_PURPLE, TextDecoration.BOLD);
 
     private File dataFolder;
+
+    /** Inventaires actuellement ouverts, un seul par proprietaire (cle = UUID du proprietaire). */
+    private final Map<UUID, Inventory> live = new HashMap<>();
 
     // ===================== CYCLE DE VIE =====================
 
@@ -123,6 +135,7 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
                 p.closeInventory();
             }
         }
+        live.clear();
         try { HandlerList.unregisterAll(this); } catch (Throwable ignored) {}
         getLogger().info("BigEnderChest desactive.");
     }
@@ -149,7 +162,7 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
         open(viewer, viewer.getUniqueId(), viewer.getName(), true);
     }
 
-    /** Ouvre le menu 54 slots de 'owner' pour 'viewer' (le contenu est charge depuis le disque). */
+    /** Ouvre le menu 54 slots de 'owner' pour 'viewer'. */
     private void open(Player viewer, UUID owner, String ownerName, boolean self) {
         // Blocage : ce joueur n'a pas le droit de voir d'ender chest.
         if (viewer.hasPermission(PERM_BLOCK)) {
@@ -158,21 +171,28 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
             return;
         }
 
-        EnderHolder holder = new EnderHolder(owner);
-        Component title = self ? TITLE
-                : Component.text("Ender de " + ownerName, NamedTextColor.DARK_PURPLE, TextDecoration.BOLD);
-        Inventory inv = Bukkit.createInventory(holder, SIZE, title);
-        holder.inventory = inv;
+        // ANTI-DUP : si un inventaire de ce proprietaire est deja ouvert quelque part,
+        // on REUTILISE le meme objet (pas de rechargement disque). Sinon on en cree un.
+        Inventory inv = live.get(owner);
+        if (inv == null) {
+            EnderHolder holder = new EnderHolder(owner);
+            Component title = self ? TITLE
+                    : Component.text("Ender de " + ownerName, NamedTextColor.DARK_PURPLE, TextDecoration.BOLD);
+            inv = Bukkit.createInventory(holder, SIZE, title);
+            holder.inventory = inv;
 
-        ItemStack[] saved = loadContents(owner);
-        if (saved != null) inv.setContents(saved);
+            ItemStack[] saved = loadContents(owner);
+            if (saved != null) inv.setContents(saved);
 
-        // Migration : une seule fois par joueur, on recupere l'ancien ender chest vanilla (27 slots).
-        Player ownerOnline = Bukkit.getPlayer(owner);
-        if (ownerOnline != null && !isMigrated(owner)) {
-            mergeVanilla(inv, ownerOnline);
-            ownerOnline.getEnderChest().clear(); // evite la duplication
-            markMigrated(owner, inv.getContents());
+            // Migration : une seule fois par joueur, on recupere l'ancien ender chest vanilla (27 slots).
+            Player ownerOnline = Bukkit.getPlayer(owner);
+            if (ownerOnline != null && !isMigrated(owner)) {
+                mergeVanilla(inv, ownerOnline);
+                ownerOnline.getEnderChest().clear(); // evite la duplication
+                markMigrated(owner, inv.getContents());
+            }
+
+            live.put(owner, inv);
         }
 
         viewer.openInventory(inv);
@@ -217,11 +237,20 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
 
     @EventHandler
     public void onClose(InventoryCloseEvent e) {
-        if (e.getInventory().getHolder() instanceof EnderHolder h) {
-            saveContents(h.owner, e.getInventory().getContents());
-            if (e.getPlayer() instanceof Player p) {
-                p.playSound(p.getLocation(), Sound.BLOCK_ENDER_CHEST_CLOSE, 1f, 1f);
-            }
+        if (!(e.getInventory().getHolder() instanceof EnderHolder h)) return;
+
+        Inventory inv = e.getInventory();
+        // On sauvegarde toujours l'etat courant (l'objet est partage, donc a jour).
+        saveContents(h.owner, inv.getContents());
+
+        if (e.getPlayer() instanceof Player p) {
+            p.playSound(p.getLocation(), Sound.BLOCK_ENDER_CHEST_CLOSE, 1f, 1f);
+        }
+
+        // Si c'etait le DERNIER visiteur, on libere l'inventaire vivant.
+        // Pendant cet event, le joueur qui ferme est encore compte dans getViewers().
+        if (!hasOtherViewers(inv, e.getPlayer())) {
+            live.remove(h.owner);
         }
     }
 
@@ -231,7 +260,20 @@ public class BigEnderChest extends LoadedPlugin implements Listener {
         Inventory top = topInventory(p);
         if (top != null && top.getHolder() instanceof EnderHolder h) {
             saveContents(h.owner, top.getContents());
+            if (!hasOtherViewers(top, p)) {
+                live.remove(h.owner);
+            }
         }
+    }
+
+    /** Reste-t-il un visiteur autre que 'closing' en train de regarder cet inventaire ? */
+    private boolean hasOtherViewers(Inventory inv, HumanEntity closing) {
+        try {
+            for (HumanEntity v : inv.getViewers()) {
+                if (v != closing) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     // ===================== PERSISTANCE (un fichier par joueur) =====================
