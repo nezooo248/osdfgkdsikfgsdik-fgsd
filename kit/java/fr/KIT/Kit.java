@@ -6,6 +6,9 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
+import org.bukkit.persistence.PersistentDataContainer;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandMap;
 import org.bukkit.command.CommandSender;
@@ -83,6 +86,7 @@ public class Kit extends LoadedPlugin implements Listener {
     private final Set<String> myCommands = new HashSet<>();
     private final Object diskLock = new Object();
     private File kitsFile;
+    private NamespacedKey kitIdKey; // clef PDC pour retrouver le kit depuis son icone
     private File cooldownsFile;
 
     // ===================== CYCLE DE VIE =====================
@@ -93,6 +97,7 @@ public class Kit extends LoadedPlugin implements Listener {
         if (dir != null && !dir.exists()) dir.mkdirs();
         this.kitsFile = new File(dir, "kits.yml");
         this.cooldownsFile = new File(dir, "kit-cooldowns.yml");
+        this.kitIdKey = new NamespacedKey("optaland_kit", "kit_id");
 
         loadKits();
         loadCooldowns();
@@ -582,8 +587,18 @@ public class Kit extends LoadedPlugin implements Listener {
         ItemStack item = new ItemStack(mat);
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
-            meta.displayName(Component.text(kit.display, allowed ? GREEN : RED, TextDecoration.BOLD)
-                    .decoration(TextDecoration.ITALIC, false));
+            Component nameComp;
+            if (kit.iconNameJson != null) {
+                // Nom personnalise de l'icone (avec sa couleur), tel que defini par l'item en main.
+                Component custom = net.kyori.adventure.text.serializer.gson.GsonComponentSerializer
+                        .gson().deserialize(kit.iconNameJson);
+                // On enleve l'italique par defaut des noms d'items.
+                nameComp = custom.decoration(TextDecoration.ITALIC, false);
+            } else {
+                nameComp = Component.text(kit.display, allowed ? GREEN : RED, TextDecoration.BOLD)
+                        .decoration(TextDecoration.ITALIC, false);
+            }
+            meta.displayName(nameComp);
 
             List<Component> lore = new ArrayList<>();
             lore.add(Component.text(countItems(kit) + " item(s)", GRAY).decoration(TextDecoration.ITALIC, false));
@@ -607,6 +622,9 @@ public class Kit extends LoadedPlugin implements Listener {
                     lore.add(Component.text("Clique pour recuperer ce kit.", YELLOW).decoration(TextDecoration.ITALIC, false));
             }
             meta.lore(lore);
+            // Identifiant cache du kit -> permet de retrouver le kit meme si le nom d'affichage change.
+            if (kitIdKey != null)
+                meta.getPersistentDataContainer().set(kitIdKey, PersistentDataType.STRING, kit.name);
             item.setItemMeta(meta);
         }
         return item;
@@ -641,8 +659,8 @@ public class Kit extends LoadedPlugin implements Listener {
         inv.setItem(E_CONTENT, button(Material.CHEST, "Editer le contenu", GREEN,
                 "Ouvre une grille.", "Depose les items du kit,", "puis ferme pour sauvegarder."));
         inv.setItem(E_ICON, button(kit.icon != null ? kit.icon : Material.CHEST, "Changer l'icone", YELLOW,
-                "Clic gauche : prend l'item dans ta main", "comme icone du /kit.",
-                "Si l'item est RENOMME, son nom", "devient aussi le nom du kit.",
+                "Clic gauche : prend l'item dans ta main", "comme icone (apparence + couleur).",
+                "Le nom affiche au survol = nom de l'item.", "Le nom interne du kit ne change pas.",
                 "Icone actuelle : " + (kit.icon != null ? kit.icon.name() : "CHEST")));
         inv.setItem(E_COOLDOWN, button(Material.CLOCK, "Changer le cooldown", YELLOW,
                 "Clic gauche : +10s   Clic droit : -10s",
@@ -821,11 +839,20 @@ public class Kit extends LoadedPlugin implements Listener {
     /** Retrouve le nom du kit a partir du nom affiche de l'icone. */
     private String matchKitByIcon(ItemStack it) {
         ItemMeta meta = it.getItemMeta();
-        if (meta == null || !meta.hasDisplayName()) return null;
-        String plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
-                .plainText().serialize(meta.displayName());
-        for (KitDef k : kits.values()) {
-            if (k.display.equalsIgnoreCase(plain)) return k.name;
+        if (meta == null) return null;
+        // 1) Identifiant cache (fiable, insensible au nom d'affichage).
+        if (kitIdKey != null) {
+            PersistentDataContainer pdc = meta.getPersistentDataContainer();
+            String id = pdc.get(kitIdKey, PersistentDataType.STRING);
+            if (id != null && kits.containsKey(id)) return id;
+        }
+        // 2) Repli : comparaison par nom d'affichage.
+        if (meta.hasDisplayName()) {
+            String plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
+                    .plainText().serialize(meta.displayName());
+            for (KitDef k : kits.values()) {
+                if (k.display.equalsIgnoreCase(plain)) return k.name;
+            }
         }
         return null;
     }
@@ -843,19 +870,17 @@ public class Kit extends LoadedPlugin implements Listener {
                 ItemStack hand = p.getInventory().getItemInMainHand();
                 if (valid(hand)) {
                     kit.icon = hand.getType();
-                    // Si l'item en main a un nom personnalise, il devient aussi le nom du kit (celui du /kit).
+                    // On garde le nom personnalise de l'item (avec sa couleur) UNIQUEMENT pour l'affichage
+                    // de l'icone dans le /kit. Le nom interne du kit (kit.display) ne change PAS.
                     ItemMeta hm = hand.getItemMeta();
-                    String taken = null;
                     if (hm != null && hm.hasDisplayName()) {
-                        String n = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
-                                .plainText().serialize(hm.displayName());
-                        if (!n.isBlank()) { kit.display = n; taken = n; }
+                        kit.iconNameJson = net.kyori.adventure.text.serializer.gson.GsonComponentSerializer
+                                .gson().serialize(hm.displayName());
+                    } else {
+                        kit.iconNameJson = null; // item sans nom -> on retombe sur le nom du kit
                     }
                     saveKits();
-                    if (taken != null)
-                        send(p, "Icone changee : " + kit.icon.name() + " | Nom : " + taken, GREEN);
-                    else
-                        send(p, "Icone changee : " + kit.icon.name(), GREEN);
+                    send(p, "Icone changee : " + kit.icon.name(), GREEN);
                     openEditMenu(p, kit);
                 } else send(p, "Tiens un item en main pour definir l'icone.", YELLOW);
             }
@@ -1042,6 +1067,7 @@ public class Kit extends LoadedPlugin implements Listener {
         String name;
         String display;
         Material icon;
+        String iconNameJson; // nom personnalise de l'icone (JSON du Component), ou null
         int cooldownSeconds = 0;
         int slot = -1;
         ItemStack[] storage;
@@ -1064,6 +1090,7 @@ public class Kit extends LoadedPlugin implements Listener {
                 k.display = cfg.getString(base + ".display", key);
                 Material m = Material.matchMaterial(cfg.getString(base + ".icon", "CHEST"));
                 k.icon = (m != null) ? m : Material.CHEST;
+                k.iconNameJson = cfg.getString(base + ".iconName", null);
                 k.cooldownSeconds = Math.max(0, cfg.getInt(base + ".cooldown", 0));
                 k.slot = cfg.getInt(base + ".slot", -1);
                 k.storage = fromBase64Safe(cfg.getString(base + ".storage"));
@@ -1086,6 +1113,7 @@ public class Kit extends LoadedPlugin implements Listener {
                 String base = "kits." + k.name;
                 cfg.set(base + ".display", k.display);
                 cfg.set(base + ".icon", (k.icon != null ? k.icon.name() : "CHEST"));
+                cfg.set(base + ".iconName", k.iconNameJson);
                 cfg.set(base + ".cooldown", k.cooldownSeconds);
                 cfg.set(base + ".slot", k.slot);
                 cfg.set(base + ".storage", toBase64Safe(k.storage));
