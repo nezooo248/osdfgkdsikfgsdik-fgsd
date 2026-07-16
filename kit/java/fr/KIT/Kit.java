@@ -501,7 +501,8 @@ public class Kit extends LoadedPlugin implements Listener {
         @Override public Inventory getInventory() { return inv; }
     }
 
-    private static final int SLOT_SAVE = 49; // bouton sauvegarder (mode organize)
+    private static final int SLOT_SAVE     = 49; // bouton sauvegarder (mode organize)
+    private static final int SLOT_ORGANIZE = 48; // bouton "reorganiser" (menu normal, OP)
 
     private void openMenu(Player p, boolean organize) {
         List<KitDef> list = new ArrayList<>(kits.values());
@@ -518,6 +519,8 @@ public class Kit extends LoadedPlugin implements Listener {
 
         Set<Integer> used = new HashSet<>(corners);
         if (organize) used.add(SLOT_SAVE);
+        boolean showOrganizeButton = !organize && isAdmin(p);
+        if (showOrganizeButton) used.add(SLOT_ORGANIZE);
 
         List<KitDef> auto = new ArrayList<>();
         for (KitDef k : list) {
@@ -552,6 +555,22 @@ public class Kit extends LoadedPlugin implements Listener {
                 save.setItemMeta(meta);
             }
             inv.setItem(SLOT_SAVE, save);
+        }
+
+        if (showOrganizeButton) {
+            ItemStack org = new ItemStack(Material.ORANGE_CONCRETE);
+            ItemMeta meta = org.getItemMeta();
+            if (meta != null) {
+                meta.displayName(Component.text("Reorganiser les kits", GOLD, TextDecoration.BOLD)
+                        .decoration(TextDecoration.ITALIC, false));
+                List<Component> lore = new ArrayList<>();
+                lore.add(Component.text("Clique pour passer en mode", GRAY).decoration(TextDecoration.ITALIC, false));
+                lore.add(Component.text("reorganisation (glisser-deposer).", GRAY).decoration(TextDecoration.ITALIC, false));
+                lore.add(Component.text("Visible par les admins uniquement.", NamedTextColor.DARK_GRAY).decoration(TextDecoration.ITALIC, false));
+                meta.lore(lore);
+                org.setItemMeta(meta);
+            }
+            inv.setItem(SLOT_ORGANIZE, org);
         }
 
         p.openInventory(inv);
@@ -622,7 +641,8 @@ public class Kit extends LoadedPlugin implements Listener {
         inv.setItem(E_CONTENT, button(Material.CHEST, "Editer le contenu", GREEN,
                 "Ouvre une grille.", "Depose les items du kit,", "puis ferme pour sauvegarder."));
         inv.setItem(E_ICON, button(kit.icon != null ? kit.icon : Material.CHEST, "Changer l'icone", YELLOW,
-                "Clique gauche : prendre l'item", "dans ta main comme icone.",
+                "Clic gauche : prend l'item dans ta main", "comme icone du /kit.",
+                "Si l'item est RENOMME, son nom", "devient aussi le nom du kit.",
                 "Icone actuelle : " + (kit.icon != null ? kit.icon.name() : "CHEST")));
         inv.setItem(E_COOLDOWN, button(Material.CLOCK, "Changer le cooldown", YELLOW,
                 "Clic gauche : +10s   Clic droit : -10s",
@@ -731,6 +751,12 @@ public class Kit extends LoadedPlugin implements Listener {
             e.setCancelled(true);
             int raw = e.getRawSlot();
             if (raw < 0 || raw >= top.getSize()) return;
+            // Bouton "Reorganiser" (OP uniquement)
+            if (raw == SLOT_ORGANIZE && isAdmin(p)) {
+                p.closeInventory();
+                openMenu(p, true);
+                return;
+            }
             String kitName = holder.slotToKit.get(raw);
             if (kitName == null) return;
             p.closeInventory();
@@ -817,8 +843,19 @@ public class Kit extends LoadedPlugin implements Listener {
                 ItemStack hand = p.getInventory().getItemInMainHand();
                 if (valid(hand)) {
                     kit.icon = hand.getType();
+                    // Si l'item en main a un nom personnalise, il devient aussi le nom du kit (celui du /kit).
+                    ItemMeta hm = hand.getItemMeta();
+                    String taken = null;
+                    if (hm != null && hm.hasDisplayName()) {
+                        String n = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
+                                .plainText().serialize(hm.displayName());
+                        if (!n.isBlank()) { kit.display = n; taken = n; }
+                    }
                     saveKits();
-                    send(p, "Icone changee : " + kit.icon.name(), GREEN);
+                    if (taken != null)
+                        send(p, "Icone changee : " + kit.icon.name() + " | Nom : " + taken, GREEN);
+                    else
+                        send(p, "Icone changee : " + kit.icon.name(), GREEN);
                     openEditMenu(p, kit);
                 } else send(p, "Tiens un item en main pour definir l'icone.", YELLOW);
             }
