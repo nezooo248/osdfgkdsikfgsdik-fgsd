@@ -11,13 +11,16 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.projectiles.ProjectileSource;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -26,14 +29,15 @@ import java.util.UUID;
  *   - Chaque coup relance le compte a rebours a 15 s.
  *   - Pendant le combat, seules /shop et /tag sont autorisees.
  *   - /tag  -> affiche le temps de combat restant.
- *   - Se deconnecter en combat = mort (anti combat-log).
+ *   - Se deconnecter en combat = mort (anti combat-log), sans duplication de stuff.
  */
 public class CombatTag extends LoadedPlugin implements Listener {
 
     private static final long TAG_MS = 15_000L; // 15 secondes
     private static final List<String> ALLOWED = List.of("shop", "tag"); // commandes autorisees en combat
 
-    private final Map<UUID, Long> tagged = new HashMap<>(); // uuid -> instant de fin (ms)
+    private final Map<UUID, Long> tagged = new HashMap<>();     // uuid -> instant de fin (ms)
+    private final Set<UUID> combatLogged = new HashSet<>();     // joueurs ayant quit en combat (filet anti-dupe)
 
     @Override
     public void onEnable() {
@@ -120,33 +124,46 @@ public class CombatTag extends LoadedPlugin implements Listener {
     public void onQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
         if (remainingSeconds(player.getUniqueId()) > 0) {
-            dropAndClear(player); // perte garantie du stuff (meme si keepInventory est actif)
-            player.setHealth(0.0); // enregistre la mort
+            dropAndClear(player);                    // lache le stuff au sol + vide l'inventaire
+            combatLogged.add(player.getUniqueId());  // filet de securite pour la reconnexion
+            player.setHealth(0.0);                   // enregistre la mort
+            // FORCE l'ecriture de l'inventaire VIDE sur le disque.
+            // Sans ca, la sauvegarde du quit peut garder l'ancien inventaire
+            // -> le joueur recupere son stuff au relog + celui au sol = DUPLICATION.
+            player.saveData();
         }
         tagged.remove(player.getUniqueId());
     }
 
+    @EventHandler
+    public void onJoin(PlayerJoinEvent event) {
+        UUID id = event.getPlayer().getUniqueId();
+        if (combatLogged.remove(id)) {
+            // Securite anti-dupe : si la sauvegarde n'a pas pris cote serveur,
+            // on revide l'inventaire au login. Le stuff a DEJA ete lache au sol
+            // lors du quit, donc aucune duplication possible.
+            event.getPlayer().getInventory().clear();
+        }
+    }
+
     /**
-     * Lache tout l'inventaire du joueur au sol puis le vide : le joueur perd son stuff.
-     * IMPORTANT : on utilise getStorageContents() (les 36 slots principaux UNIQUEMENT).
-     * getContents() inclut deja l'armure + l'offhand pour un joueur, ce qui doublait
-     * l'armure quand on rajoutait les boucles armure/offhand -> duplication.
+     * Lache tout l'inventaire du joueur au sol puis le vide.
+     * On utilise getStorageContents() (les 36 slots principaux UNIQUEMENT) :
+     * getContents() inclut deja l'armure + l'offhand pour un joueur, ce qui
+     * doublait l'armure quand on rajoutait les boucles armure/offhand.
      */
     private void dropAndClear(Player player) {
         var world = player.getWorld();
         var loc = player.getLocation();
         var inv = player.getInventory();
 
-        // Slots principaux (36) uniquement, PAS l'armure ni l'offhand.
-        for (var item : inv.getStorageContents()) {
+        for (var item : inv.getStorageContents()) { // 36 slots principaux
             if (item != null && !item.getType().isAir()) world.dropItemNaturally(loc, item);
         }
-        // Armure (4 slots) : une seule fois.
-        for (var item : inv.getArmorContents()) {
+        for (var item : inv.getArmorContents()) {    // armure (4 slots)
             if (item != null && !item.getType().isAir()) world.dropItemNaturally(loc, item);
         }
-        // Main secondaire / offhand : une seule fois.
-        for (var item : inv.getExtraContents()) {
+        for (var item : inv.getExtraContents()) {    // main secondaire / offhand
             if (item != null && !item.getType().isAir()) world.dropItemNaturally(loc, item);
         }
         inv.clear();
