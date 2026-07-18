@@ -126,21 +126,30 @@ public class CombatTag extends LoadedPlugin implements Listener {
         tagged.remove(player.getUniqueId());
     }
 
-    /** Lache tout l'inventaire du joueur au sol puis le vide : le joueur perd son stuff. */
+    /**
+     * Lache tout l'inventaire du joueur au sol puis le vide : le joueur perd son stuff.
+     * IMPORTANT : on utilise getStorageContents() (les 36 slots principaux UNIQUEMENT).
+     * getContents() inclut deja l'armure + l'offhand pour un joueur, ce qui doublait
+     * l'armure quand on rajoutait les boucles armure/offhand -> duplication.
+     */
     private void dropAndClear(Player player) {
         var world = player.getWorld();
         var loc = player.getLocation();
+        var inv = player.getInventory();
 
-        for (var item : player.getInventory().getContents()) {
+        // Slots principaux (36) uniquement, PAS l'armure ni l'offhand.
+        for (var item : inv.getStorageContents()) {
             if (item != null && !item.getType().isAir()) world.dropItemNaturally(loc, item);
         }
-        for (var item : player.getInventory().getArmorContents()) {
+        // Armure (4 slots) : une seule fois.
+        for (var item : inv.getArmorContents()) {
             if (item != null && !item.getType().isAir()) world.dropItemNaturally(loc, item);
         }
-        for (var item : player.getInventory().getExtraContents()) {
+        // Main secondaire / offhand : une seule fois.
+        for (var item : inv.getExtraContents()) {
             if (item != null && !item.getType().isAir()) world.dropItemNaturally(loc, item);
         }
-        player.getInventory().clear();
+        inv.clear();
     }
 
     @EventHandler
