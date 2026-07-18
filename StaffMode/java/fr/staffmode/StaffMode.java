@@ -55,7 +55,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *   /grade <nom>           -> (EN STAFF) active/desactive un grade temporaire (perm grade.<nom>).
  *   /tp <joueur>           -> tp au joueur (en mode staff) sinon /tp vanilla.
  *   /survie                -> survie.
- *   /inventorybackup <joueur> [numero|latest|undo]  (OP) -> restaure un inventaire sauvegarde.
+ *   /inventorybackup <joueur> [numero|latest|undo|duree]  (OP) -> restaure un inventaire sauvegarde.
+ *                            duree = 10m, 2h, 48h, 1j2h ... -> le backup le plus proche de "il y a X".
  *
  * GESTION DES ROLES (LuckPerms) :
  *   /staff (entree) -> AJOUTE ton grade staff (le plus haut pour lequel tu as la permission
@@ -480,7 +481,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
         registerOne(map, "survie", "Passe en survie", "/survie", List.of("survival", "surv"),
                 (s, a) -> handleSurvie(s), null);
         registerOne(map, "inventorybackup", "Restaure un inventaire sauvegarde",
-                "/inventorybackup <joueur> [numero|latest|undo]", List.of("invbackup", "invrestore"),
+                "/inventorybackup <joueur> [numero|latest|undo|duree]", List.of("invbackup", "invrestore"),
                 (s, a) -> handleInventoryBackup(s, a), (s, a) -> tabBackup(a));
     }
 
@@ -1034,7 +1035,8 @@ public class StaffMode extends LoadedPlugin implements Listener {
             return true;
         }
         if (a.length == 0) {
-            send(s, "Usage: /inventorybackup <joueur> [numero|latest|undo]", NamedTextColor.GRAY);
+            send(s, "Usage: /inventorybackup <joueur> [numero|latest|undo|duree]", NamedTextColor.GRAY);
+            send(s, "  duree = 10m, 2h, 48h, 1j2h ... -> le backup le plus proche de \"il y a X\".", NamedTextColor.DARK_GRAY);
             return true;
         }
         String target = a[0];
@@ -1059,7 +1061,7 @@ public class StaffMode extends LoadedPlugin implements Listener {
                         .append(Component.text(countItems(snap) + " items", NamedTextColor.AQUA)));
                 i++;
             }
-            send(s, "Restaurer : /inventorybackup " + target + " <numero>   (ou latest / undo)", NamedTextColor.GRAY);
+            send(s, "Restaurer : /inventorybackup " + target + " <numero>   (ou latest / undo / une duree comme 10m, 2h, 48h)", NamedTextColor.GRAY);
             return true;
         }
 
@@ -1075,11 +1077,21 @@ public class StaffMode extends LoadedPlugin implements Listener {
             chosen = null;
             for (Snapshot snap : snaps) { if ("pre-restore".equals(snap.reason)) { chosen = snap; break; } }
             if (chosen == null) { send(s, "Aucun point d'annulation (pre-restore) trouve.", NamedTextColor.RED); return true; }
-        } else {
-            int idx;
-            try { idx = Integer.parseInt(arg); } catch (Exception ex) { send(s, "Numero invalide : " + a[1], NamedTextColor.RED); return true; }
+        } else if (arg.matches("\\d+")) {
+            int idx = Integer.parseInt(arg);
             if (idx < 1 || idx > snaps.size()) { send(s, "Numero hors limites (1-" + snaps.size() + ").", NamedTextColor.RED); return true; }
             chosen = snaps.get(idx - 1);
+        } else {
+            // Duree : 10m, 2h, 48h, 1j2h30m ... -> on prend le backup le plus proche de "il y a X".
+            long durMs = parseDurationMs(arg);
+            if (durMs < 0) {
+                send(s, "Argument invalide : " + a[1] + " (attendu : numero, latest, undo, ou une duree comme 10m / 2h / 48h).", NamedTextColor.RED);
+                return true;
+            }
+            long targetTime = System.currentTimeMillis() - durMs;
+            chosen = closestSnapshot(snaps, targetTime);
+            if (chosen == null) { send(s, "Aucun backup trouve.", NamedTextColor.RED); return true; }
+            send(s, "Duree demandee : " + humanDuration(durMs) + " -> backup le plus proche : " + ago(chosen.time) + ".", NamedTextColor.YELLOW);
         }
 
         // Point d'annulation : on sauvegarde l'inventaire actuel AVANT d'ecraser.
@@ -1139,10 +1151,61 @@ public class StaffMode extends LoadedPlugin implements Listener {
         return "il y a " + sec + "s";
     }
 
+    /**
+     * Parse une duree type 10m / 2h / 48h / 1j2h30m. Unites : s (sec), m (min), h (heure),
+     * j ou d (jour). Retourne les millisecondes, ou -1 si l'entree est invalide.
+     */
+    private long parseDurationMs(String raw) {
+        if (raw == null) return -1;
+        String str = raw.toLowerCase(Locale.ROOT).replace(" ", "");
+        if (str.isEmpty()) return -1;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+)([smhjd])").matcher(str);
+        long total = 0;
+        int covered = 0;
+        boolean any = false;
+        while (m.find()) {
+            if (m.start() != covered) return -1; // caracteres parasites entre deux tokens
+            long n;
+            try { n = Long.parseLong(m.group(1)); } catch (Exception ex) { return -1; }
+            switch (m.group(2)) {
+                case "s": total += n * 1000L; break;
+                case "m": total += n * 60_000L; break;
+                case "h": total += n * 3_600_000L; break;
+                case "j": case "d": total += n * 86_400_000L; break;
+                default: return -1;
+            }
+            covered = m.end();
+            any = true;
+        }
+        if (!any || covered != str.length()) return -1; // reste des caracteres non reconnus
+        return total;
+    }
+
+    /** Backup dont l'horodatage est le plus proche de targetTime. */
+    private Snapshot closestSnapshot(List<Snapshot> snaps, long targetTime) {
+        Snapshot best = null;
+        long bestDiff = Long.MAX_VALUE;
+        for (Snapshot snap : snaps) {
+            long diff = Math.abs(snap.time - targetTime);
+            if (diff < bestDiff) { bestDiff = diff; best = snap; }
+        }
+        return best;
+    }
+
+    /** Formatte une duree en millisecondes -> "2h 30m", "48h", "10m"... */
+    private String humanDuration(long ms) {
+        long sec = Math.max(0, ms) / 1000, min = sec / 60, h = min / 60, day = h / 24;
+        if (day > 0) return day + "j " + (h % 24) + "h";
+        if (h > 0)   return h + "h " + (min % 60) + "m";
+        if (min > 0) return min + "m";
+        return sec + "s";
+    }
+
     private List<String> tabBackup(String[] a) {
         if (a.length == 1) return tabPlayers(a);
         if (a.length == 2) {
-            List<String> base = new ArrayList<>(List.of("latest", "undo", "1", "2", "3", "5", "10"));
+            List<String> base = new ArrayList<>(List.of("latest", "undo", "1", "2", "3", "5", "10",
+                    "10m", "30m", "1h", "2h", "6h", "12h", "24h", "48h"));
             String x = a[1].toLowerCase(Locale.ROOT);
             base.removeIf(o -> !o.startsWith(x));
             return base;
