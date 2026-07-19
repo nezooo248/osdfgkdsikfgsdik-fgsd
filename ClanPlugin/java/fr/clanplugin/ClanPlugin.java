@@ -5,7 +5,9 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.World;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandMap;
 import org.bukkit.command.CommandSender;
@@ -237,6 +239,9 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
             case "deny": case "refuser": return cmdDeny(sender, args);
             case "leave": case "quitter": return cmdLeave(sender);
             case "pvp": return cmdPvp(sender);
+            case "sethome": case "definirhome": return cmdSetHome(sender);
+            case "home": return cmdHome(sender);
+            case "delhome": return cmdDelHome(sender);
             case "dissoudre": case "disband": return cmdDisband(sender, args);
             case "info": return cmdInfo(sender, args);
             default: cmdHelp(sender); return true;
@@ -346,6 +351,46 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
         return true;
     }
 
+    private boolean cmdSetHome(CommandSender s) {
+        if (!(s instanceof Player p)) { send(s, "Joueurs uniquement.", NamedTextColor.RED); return true; }
+        Clan clan = getClanOf(p.getUniqueId());
+        if (clan == null) { send(p, "Tu n'es dans aucun clan.", NamedTextColor.RED); return true; }
+        if (!clan.isLeader(p.getUniqueId())) { send(p, "Seul le chef peut definir le home du clan.", NamedTextColor.RED); return true; }
+        Location loc = p.getLocation();
+        if (loc.getWorld() == null) { send(p, "Position invalide.", NamedTextColor.RED); return true; }
+        clan.setHome(loc.getWorld().getName(), loc.getX(), loc.getY(), loc.getZ(), loc.getYaw(), loc.getPitch());
+        save();
+        send(p, "Home du clan defini a ta position actuelle.", NamedTextColor.GREEN);
+        return true;
+    }
+
+    private boolean cmdHome(CommandSender s) {
+        if (!(s instanceof Player p)) { send(s, "Joueurs uniquement.", NamedTextColor.RED); return true; }
+        Clan clan = getClanOf(p.getUniqueId());
+        if (clan == null) { send(p, "Tu n'es dans aucun clan.", NamedTextColor.RED); return true; }
+        if (!clan.hasHome()) { send(p, "Le home du clan n'est pas encore defini.", NamedTextColor.RED); return true; }
+        if (!clan.canUseHome(p.getUniqueId())) {
+            send(p, "Tu n'as pas l'autorisation d'aller au home du clan.", NamedTextColor.RED); return true;
+        }
+        Location loc = clan.getHome();
+        if (loc == null) { send(p, "Le monde du home est introuvable (non charge ?).", NamedTextColor.RED); return true; }
+        p.teleport(loc);
+        send(p, "Teleporte au home du clan.", NamedTextColor.GREEN);
+        return true;
+    }
+
+    private boolean cmdDelHome(CommandSender s) {
+        if (!(s instanceof Player p)) { send(s, "Joueurs uniquement.", NamedTextColor.RED); return true; }
+        Clan clan = getClanOf(p.getUniqueId());
+        if (clan == null) { send(p, "Tu n'es dans aucun clan.", NamedTextColor.RED); return true; }
+        if (!clan.isLeader(p.getUniqueId())) { send(p, "Seul le chef peut supprimer le home du clan.", NamedTextColor.RED); return true; }
+        if (!clan.hasHome()) { send(p, "Aucun home defini.", NamedTextColor.RED); return true; }
+        clan.clearHome();
+        save();
+        send(p, "Home du clan supprime.", NamedTextColor.GRAY);
+        return true;
+    }
+
     private boolean cmdDisband(CommandSender s, String[] a) {
         boolean staff = s.hasPermission("clan.staff");
         Clan target;
@@ -404,6 +449,8 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
         s.sendMessage(Component.text("/clan invite <joueur> (max " + MAX_MEMBERS + ")", NamedTextColor.YELLOW));
         s.sendMessage(Component.text("/clan accept [nom]  |  /clan deny [nom]", NamedTextColor.YELLOW));
         s.sendMessage(Component.text("/clan pvp - active/desactive le PvP entre membres (chef)", NamedTextColor.YELLOW));
+        s.sendMessage(Component.text("/clan sethome - definit le home du clan (chef)", NamedTextColor.YELLOW));
+        s.sendMessage(Component.text("/clan home - se teleporte au home (si autorise)", NamedTextColor.YELLOW));
         s.sendMessage(Component.text("/clan leave", NamedTextColor.YELLOW));
         if (s.hasPermission("clan.staff")) {
             s.sendMessage(Component.text("/clan dissoudre <nom> (staff)", NamedTextColor.RED));
@@ -413,7 +460,7 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
 
     private List<String> handleTab(CommandSender s, String[] a) {
         if (a.length == 1) {
-            List<String> subs = new ArrayList<>(List.of("create", "invite", "accept", "deny", "leave", "pvp", "help"));
+            List<String> subs = new ArrayList<>(List.of("create", "invite", "accept", "deny", "leave", "pvp", "sethome", "home", "delhome", "help"));
             if (s.hasPermission("clan.staff")) { subs.add("dissoudre"); subs.add("info"); }
             else if (s instanceof Player p) {
                 Clan cl = getClanOf(p.getUniqueId());
@@ -455,6 +502,7 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
     private static final int INFO_SLOT = 4;
     private static final int[] MEMBER_SLOTS = {19, 20, 21, 22, 23};
     private static final int HEAD_SLOT = 4, KICK_SLOT = 11, ROLE_SLOT = 15, BACK_SLOT = 22;
+    private static final int HOME_ACCESS_SLOT = 13;
     private static final int PVP_SLOT = 8;
 
     private void openMain(Player viewer, Clan clan) {
@@ -529,6 +577,20 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
                 inv.setItem(ROLE_SLOT, item(Material.GRAY_DYE, "Repasser membre", NamedTextColor.YELLOW,
                         List.of(line("Retire le grade de bras droit.", NamedTextColor.GRAY))));
         }
+
+        // Bouton d'acces au /clan home (chef uniquement, pour les autres membres)
+        if (leader && tr != Clan.Role.LEADER) {
+            boolean allowed = clan.canUseHome(target);
+            List<Component> hlore = new ArrayList<>();
+            hlore.add(line("Etat: " + (allowed ? "AUTORISE" : "REFUSE"),
+                    allowed ? NamedTextColor.GREEN : NamedTextColor.RED));
+            hlore.add(Component.empty());
+            hlore.add(line("Clic pour " + (allowed ? "retirer" : "donner") + " l'acces a /clan home",
+                    NamedTextColor.YELLOW));
+            inv.setItem(HOME_ACCESS_SLOT, item(allowed ? Material.LIME_DYE : Material.RED_DYE,
+                    "Acces au /clan home", allowed ? NamedTextColor.GREEN : NamedTextColor.RED, hlore));
+        }
+
         inv.setItem(BACK_SLOT, item(Material.ARROW, "Retour", NamedTextColor.GRAY, List.of()));
         viewer.openInventory(inv);
     }
@@ -586,6 +648,24 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
             int slot = e.getSlot();
 
             if (slot == BACK_SLOT) { openMain(p, clan); return; }
+
+            if (slot == HOME_ACCESS_SLOT) {
+                if (!clan.isLeader(p.getUniqueId())) { send(p, "Seul le chef peut gerer cet acces.", NamedTextColor.RED); return; }
+                if (clan.isLeader(target)) return; // le chef a toujours l'acces
+                boolean now = !clan.canUseHome(target);
+                clan.setHomeAccess(target, now);
+                save();
+                Player t = Bukkit.getPlayer(target);
+                if (now) {
+                    send(p, "Tu as autorise " + pname(target) + " a utiliser /clan home.", NamedTextColor.GREEN);
+                    if (t != null) send(t, "Tu peux maintenant utiliser /clan home !", NamedTextColor.GREEN);
+                } else {
+                    send(p, "Tu as retire l'acces a /clan home a " + pname(target) + ".", NamedTextColor.YELLOW);
+                    if (t != null) send(t, "Tu ne peux plus utiliser /clan home.", NamedTextColor.GRAY);
+                }
+                openMember(p, clan, target);
+                return;
+            }
 
             if (slot == KICK_SLOT) {
                 if (doKick(clan, p.getUniqueId(), target)) {
@@ -693,6 +773,18 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
                     for (String mm : cfg.getStringList(path + ".members")) clan.addMember(UUID.fromString(mm));
                     for (String oo : cfg.getStringList(path + ".officers")) clan.getOfficers().add(UUID.fromString(oo));
                     clan.setPvp(cfg.getBoolean(path + ".pvp", false));
+                    for (String hh : cfg.getStringList(path + ".homeAccess")) {
+                        try { clan.setHomeAccess(UUID.fromString(hh), true); } catch (IllegalArgumentException ignored) {}
+                    }
+                    if (cfg.isConfigurationSection(path + ".home")) {
+                        String hw = cfg.getString(path + ".home.world");
+                        if (hw != null) clan.setHome(hw,
+                                cfg.getDouble(path + ".home.x"),
+                                cfg.getDouble(path + ".home.y"),
+                                cfg.getDouble(path + ".home.z"),
+                                (float) cfg.getDouble(path + ".home.yaw"),
+                                (float) cfg.getDouble(path + ".home.pitch"));
+                    }
                     clans.put(name.toLowerCase(Locale.ROOT), clan);
                     for (UUID u : clan.getMembers()) playerClan.put(u, name.toLowerCase(Locale.ROOT));
                 } catch (IllegalArgumentException ex) {
@@ -719,6 +811,17 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
             for (UUID u : clan.getOfficers()) off.add(u.toString());
             cfg.set(path + ".officers", off);
             cfg.set(path + ".pvp", clan.isPvp());
+            List<String> ha = new ArrayList<>();
+            for (UUID u : clan.getHomeAccess()) ha.add(u.toString());
+            cfg.set(path + ".homeAccess", ha);
+            if (clan.hasHome()) {
+                cfg.set(path + ".home.world", clan.getHomeWorld());
+                cfg.set(path + ".home.x", clan.getHomeX());
+                cfg.set(path + ".home.y", clan.getHomeY());
+                cfg.set(path + ".home.z", clan.getHomeZ());
+                cfg.set(path + ".home.yaw", (double) clan.getHomeYaw());
+                cfg.set(path + ".home.pitch", (double) clan.getHomePitch());
+            }
         }
         for (Map.Entry<UUID, String> e : names.entrySet()) cfg.set("names." + e.getKey(), e.getValue());
         try {
@@ -738,7 +841,13 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
         private final UUID leader;
         private final Set<UUID> members = new LinkedHashSet<>();
         private final Set<UUID> officers = new LinkedHashSet<>();
+        private final Set<UUID> homeAccess = new LinkedHashSet<>(); // membres (hors chef) autorises a /clan home
         private boolean pvp = false; // PvP entre membres desactive par defaut
+        // Home du clan (le chef y a toujours acces)
+        private boolean hasHome = false;
+        private String homeWorld;
+        private double homeX, homeY, homeZ;
+        private float homeYaw, homePitch;
         Clan(String name, UUID leader) { this.name = name; this.leader = leader; this.members.add(leader); }
         String getName() { return name; }
         UUID getLeader() { return leader; }
@@ -757,10 +866,41 @@ public class ClanPlugin extends LoadedPlugin implements Listener {
             return null;
         }
         void addMember(UUID u) { members.add(u); }
-        void removeMember(UUID u) { members.remove(u); officers.remove(u); }
+        void removeMember(UUID u) { members.remove(u); officers.remove(u); homeAccess.remove(u); }
         void promote(UUID u) { if (members.contains(u) && !leader.equals(u)) officers.add(u); }
         void demote(UUID u) { officers.remove(u); }
         boolean canInvite(UUID u) { return isLeader(u) || isOfficer(u); }
+
+        // ---- Home ----
+        boolean hasHome() { return hasHome; }
+        void setHome(String world, double x, double y, double z, float yaw, float pitch) {
+            if (world == null) return;
+            this.homeWorld = world; this.homeX = x; this.homeY = y; this.homeZ = z;
+            this.homeYaw = yaw; this.homePitch = pitch; this.hasHome = true;
+        }
+        void clearHome() {
+            this.hasHome = false; this.homeWorld = null;
+            this.homeX = this.homeY = this.homeZ = 0; this.homeYaw = this.homePitch = 0f;
+        }
+        Location getHome() {
+            if (!hasHome) return null;
+            World w = Bukkit.getWorld(homeWorld);
+            if (w == null) return null;
+            return new Location(w, homeX, homeY, homeZ, homeYaw, homePitch);
+        }
+        String getHomeWorld() { return homeWorld; }
+        double getHomeX() { return homeX; }
+        double getHomeY() { return homeY; }
+        double getHomeZ() { return homeZ; }
+        float getHomeYaw() { return homeYaw; }
+        float getHomePitch() { return homePitch; }
+
+        // ---- Acces au home ----
+        Set<UUID> getHomeAccess() { return homeAccess; }
+        boolean canUseHome(UUID u) { return isLeader(u) || homeAccess.contains(u); }
+        void setHomeAccess(UUID u, boolean allow) {
+            if (allow) homeAccess.add(u); else homeAccess.remove(u);
+        }
     }
 
     static class ClanMenuHolder implements InventoryHolder {
