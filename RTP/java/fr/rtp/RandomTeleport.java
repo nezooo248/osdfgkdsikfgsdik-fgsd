@@ -23,6 +23,8 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.scheduler.BukkitRunnable;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -98,7 +100,61 @@ public class RandomTeleport extends LoadedPlugin {
             t.printStackTrace();
         }
 
+        // 3) Reprise du label court /rtp, 1s apres le demarrage (une fois que tous
+        //    les autres plugins se sont enregistres).
+        Bukkit.getScheduler().runTaskLater(getHost(), () -> forceClaimLabel("rtp"), 20L);
+
         getLogger().info("RandomTeleport active.");
+    }
+
+    /**
+     * Si /rtp est occupe par un autre plugin (ou par une ancienne instance restee
+     * dans la command map apres un reload a chaud), on reprend le label.
+     * rtp:rtp continue evidemment de fonctionner dans tous les cas.
+     */
+    @SuppressWarnings("unchecked")
+    private void forceClaimLabel(String label) {
+        try {
+            Object server = Bukkit.getServer();
+            Object map = server.getClass().getMethod("getCommandMap").invoke(server);
+            Method getCommand = map.getClass().getMethod("getCommand", String.class);
+
+            // Notre commande, via sa version prefixee.
+            Object ours = getCommand.invoke(map, "rtp:" + label);
+            if (ours == null) {
+                getLogger().warning("[RTP] Commande rtp:" + label + " introuvable dans la command map.");
+                return;
+            }
+
+            Object current = getCommand.invoke(map, label);
+            if (current == ours) {
+                getLogger().info("[RTP] /" + label + " pointe bien vers nous.");
+                return;
+            }
+
+            // knownCommands est declare dans SimpleCommandMap : on remonte la hierarchie.
+            Field field = null;
+            for (Class<?> c = map.getClass(); c != null && field == null; c = c.getSuperclass()) {
+                try { field = c.getDeclaredField("knownCommands"); } catch (NoSuchFieldException ignored) { }
+            }
+            if (field == null) {
+                getLogger().warning("[RTP] knownCommands introuvable, /" + label + " reste pris.");
+                return;
+            }
+            field.setAccessible(true);
+            ((Map<String, Object>) field.get(map)).put(label, ours);
+
+            getLogger().warning("[RTP] /" + label + " etait occupe par : "
+                    + (current == null ? "une entree morte" : current.getClass().getName())
+                    + " -> label repris.");
+
+            // Resynchronise l'auto-completion cote client (Brigadier).
+            try { server.getClass().getMethod("syncCommands").invoke(server); } catch (Throwable ignored) { }
+
+        } catch (Throwable t) {
+            getLogger().warning("[RTP] Reprise de /" + label + " impossible : " + t
+                    + " (utilise /rtp:rtp en attendant)");
+        }
     }
 
     @Override
