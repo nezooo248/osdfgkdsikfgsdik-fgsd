@@ -196,7 +196,7 @@ public class RandomTeleport extends LoadedPlugin {
 
         try {
             player.openInventory(inv);
-            player.playSound(player.getLocation(), Sound.BLOCK_CHEST_OPEN, 0.6f, 0.7f);
+            player.playSound(player.getLocation(), Sound.BLOCK_AMETHYST_BLOCK_CHIME, 0.7f, 1.0f);
         } catch (Throwable t) {
             player.sendMessage(msg("Erreur a l'ouverture du menu, previens un admin.", NamedTextColor.RED));
             getLogger().severe("[RTP] openMenu a echoue : " + t);
