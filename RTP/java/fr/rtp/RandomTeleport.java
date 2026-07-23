@@ -48,7 +48,7 @@ import java.util.UUID;
  * Cooldown : 5 minutes (bypass : rtp.cooldown.bypass).
  * Warmup   : 5 secondes, annule si le joueur bouge.
  */
-public class RandomTeleport extends LoadedPlugin implements Listener {
+public class RandomTeleport extends LoadedPlugin {
 
     private static final long COOLDOWN_MS = 5L * 60L * 1000L; // 5 minutes
     private static final int BASIC_MIN = 10_000, BASIC_MAX = 25_000;
@@ -71,8 +71,8 @@ public class RandomTeleport extends LoadedPlugin implements Listener {
 
     @Override
     public void onEnable() {
-        Bukkit.getPluginManager().registerEvents(this, getHost());
-
+        // 1) La commande D'ABORD : si l'enregistrement des events echoue,
+        //    /rtp continue au moins de repondre.
         registerCommand("rtp", (sender, cmd, label, args) -> {
             if (!(sender instanceof Player player)) {
                 sender.sendMessage(msg("Commande reservee aux joueurs.", NamedTextColor.RED));
@@ -87,6 +87,16 @@ public class RandomTeleport extends LoadedPlugin implements Listener {
             openMenu(player);
             return true;
         });
+        getLogger().info("[RTP] Commande /rtp enregistree.");
+
+        // 2) Les events ensuite, isoles : une erreur ici ne casse plus la commande.
+        try {
+            Bukkit.getPluginManager().registerEvents(new MenuListener(), getHost());
+            getLogger().info("[RTP] Listener du menu enregistre.");
+        } catch (Throwable t) {
+            getLogger().severe("[RTP] Impossible d'enregistrer le listener : " + t);
+            t.printStackTrace();
+        }
 
         getLogger().info("RandomTeleport active.");
     }
@@ -128,8 +138,14 @@ public class RandomTeleport extends LoadedPlugin implements Listener {
         inv.setItem(SLOT_END, icon(Material.END_STONE, "End", NamedTextColor.LIGHT_PURPLE,
                 World.Environment.THE_END, min, max, vip));
 
-        player.openInventory(inv);
-        player.playSound(player.getLocation(), Sound.BLOCK_CHEST_OPEN, 0.6f, 1.4f);
+        try {
+            player.openInventory(inv);
+            player.playSound(player.getLocation(), Sound.BLOCK_CHEST_OPEN, 0.6f, 1.4f);
+        } catch (Throwable t) {
+            player.sendMessage(msg("Erreur a l'ouverture du menu, previens un admin.", NamedTextColor.RED));
+            getLogger().severe("[RTP] openMenu a echoue : " + t);
+            t.printStackTrace();
+        }
     }
 
     private ItemStack icon(Material mat, String name, NamedTextColor color,
@@ -165,6 +181,9 @@ public class RandomTeleport extends LoadedPlugin implements Listener {
         return Component.text(text, color).decoration(TextDecoration.ITALIC, false);
     }
 
+    /** Listener separe : evite les fuites si le loader recharge le plugin. */
+    private final class MenuListener implements Listener {
+
     @EventHandler
     public void onDrag(InventoryDragEvent event) {
         if (event.getInventory().getHolder() instanceof RtpMenu) event.setCancelled(true);
@@ -189,6 +208,7 @@ public class RandomTeleport extends LoadedPlugin implements Listener {
 
         player.closeInventory();
         launch(player, env);
+    }
     }
 
     // --------------------------------------------------------------- lancement
