@@ -3,38 +3,76 @@ package fr.rtp;
 import fr.loader.api.LoadedPlugin;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.Particle;
+import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.scheduler.BukkitRunnable;
 
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * Teleportation aleatoire (RTP).
- *   /rtp  -> teleporte le joueur a une position aleatoire.
+ * Teleportation aleatoire (RTP) avec menu.
+ *   /rtp -> ouvre un coffre 3x9 :
  *
- * Portee (distance depuis le centre 0,0) :
- *   - basique       : entre 10 000 et 25 000 blocks   (permission rtp.use)
- *   - rtp.vip       : entre 30 000 et 50 000 blocks
+ *      x x x x x x x x x
+ *      x x R x N x E x x      R = Terre (Overworld)
+ *      x x x x x x x x x      N = Netherrack (Nether)
+ *                             E = End Stone (End, loin de l'ile du dragon)
  *
- * Cooldown : 5 minutes (contournable avec rtp.cooldown.bypass).
+ * Portee (distance depuis 0,0) :
+ *   - basique  : 10 000 -> 25 000 blocks   (permission rtp.use)
+ *   - rtp.vip  : 30 000 -> 50 000 blocks
+ *
+ * Cooldown : 5 minutes (bypass : rtp.cooldown.bypass).
+ * Warmup   : 5 secondes, annule si le joueur bouge.
  */
-public class RandomTeleport extends LoadedPlugin {
+public class RandomTeleport extends LoadedPlugin implements Listener {
 
     private static final long COOLDOWN_MS = 5L * 60L * 1000L; // 5 minutes
     private static final int BASIC_MIN = 10_000, BASIC_MAX = 25_000;
     private static final int VIP_MIN   = 30_000, VIP_MAX   = 50_000;
-    private static final int MAX_ATTEMPTS = 40;
+
+    private static final int WARMUP_SECONDS = 5;
+
+    /** Rayon interdit autour de 0,0 dans l'End (ile principale / dragon / fontaine). */
+    private static final int END_FORBIDDEN_RADIUS = 2_000;
+
+    // Slots du menu (ligne du milieu : 9..17)
+    private static final int SLOT_OVERWORLD = 11;
+    private static final int SLOT_NETHER    = 13;
+    private static final int SLOT_END       = 15;
 
     private final Map<UUID, Long> cooldowns = new HashMap<>();
+    private final Set<UUID> warming = new HashSet<>();
+
+    // ------------------------------------------------------------------ setup
 
     @Override
     public void onEnable() {
+        Bukkit.getPluginManager().registerEvents(this, getHost());
+
         registerCommand("rtp", (sender, cmd, label, args) -> {
             if (!(sender instanceof Player player)) {
                 sender.sendMessage(msg("Commande reservee aux joueurs.", NamedTextColor.RED));
@@ -44,59 +82,295 @@ public class RandomTeleport extends LoadedPlugin {
                 player.sendMessage(msg("Vous n'avez pas la permission d'utiliser le RTP.", NamedTextColor.RED));
                 return true;
             }
+            if (isOnCooldown(player, true)) return true;
 
-            // Cooldown
-            long now = System.currentTimeMillis();
-            if (!player.hasPermission("rtp.cooldown.bypass")) {
-                Long last = cooldowns.get(player.getUniqueId());
-                if (last != null && now - last < COOLDOWN_MS) {
-                    long remain = (COOLDOWN_MS - (now - last)) / 1000L;
-                    player.sendMessage(msg("Patiente encore " + formatTime(remain) + " avant un nouveau /rtp.", NamedTextColor.RED));
-                    return true;
-                }
-            }
-
-            int min, max;
-            if (player.hasPermission("rtp.vip")) { min = VIP_MIN;   max = VIP_MAX;   }
-            else                                 { min = BASIC_MIN; max = BASIC_MAX; }
-
-            player.sendMessage(msg("Recherche d'un endroit sur...", NamedTextColor.GRAY));
-            tryTeleport(player, min, max, MAX_ATTEMPTS);
+            openMenu(player);
             return true;
         });
+
         getLogger().info("RandomTeleport active.");
     }
 
-    /** Tente une teleportation ; recommence (async) tant qu'aucun endroit sur n'est trouve. */
-    private void tryTeleport(Player player, int min, int max, int attemptsLeft) {
-        if (!player.isOnline()) return;
-        if (attemptsLeft <= 0) {
-            player.sendMessage(msg("Impossible de trouver un endroit sur, reessaie.", NamedTextColor.RED));
+    @Override
+    public void onDisable() {
+        // Ferme les menus encore ouverts pour eviter les items fantomes.
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            if (p.getOpenInventory().getTopInventory().getHolder() instanceof RtpMenu) {
+                p.closeInventory();
+            }
+        }
+        warming.clear();
+        getLogger().info("RandomTeleport desactive.");
+    }
+
+    // ------------------------------------------------------------------- menu
+
+    /** Marqueur : permet de reconnaitre notre inventaire sans se fier au titre. */
+    private static final class RtpMenu implements InventoryHolder {
+        private Inventory inventory;
+        @Override public Inventory getInventory() { return inventory; }
+    }
+
+    private void openMenu(Player player) {
+        boolean vip = player.hasPermission("rtp.vip");
+        int min = vip ? VIP_MIN : BASIC_MIN;
+        int max = vip ? VIP_MAX : BASIC_MAX;
+
+        RtpMenu holder = new RtpMenu();
+        Inventory inv = Bukkit.createInventory(holder, 27,
+                Component.text("RTP - Choisis ta destination", NamedTextColor.DARK_PURPLE));
+        holder.inventory = inv;
+
+        inv.setItem(SLOT_OVERWORLD, icon(Material.DIRT, "Overworld", NamedTextColor.GREEN,
+                World.Environment.NORMAL, min, max, vip));
+        inv.setItem(SLOT_NETHER, icon(Material.NETHERRACK, "Nether", NamedTextColor.RED,
+                World.Environment.NETHER, min, max, vip));
+        inv.setItem(SLOT_END, icon(Material.END_STONE, "End", NamedTextColor.LIGHT_PURPLE,
+                World.Environment.THE_END, min, max, vip));
+
+        player.openInventory(inv);
+        player.playSound(player.getLocation(), Sound.BLOCK_CHEST_OPEN, 0.6f, 1.4f);
+    }
+
+    private ItemStack icon(Material mat, String name, NamedTextColor color,
+                           World.Environment env, int min, int max, boolean vip) {
+        ItemStack item = new ItemStack(mat);
+        ItemMeta meta = item.getItemMeta();
+
+        meta.displayName(Component.text(name, color)
+                .decoration(TextDecoration.ITALIC, false)
+                .decoration(TextDecoration.BOLD, true));
+
+        List<Component> lore = new ArrayList<>();
+        lore.add(lore("Distance : " + fmt(min) + " -> " + fmt(max) + " blocks", NamedTextColor.GRAY));
+        lore.add(lore(vip ? "Rang : VIP" : "Rang : basique", vip ? NamedTextColor.GOLD : NamedTextColor.DARK_GRAY));
+        lore.add(Component.empty());
+        if (env == World.Environment.THE_END) {
+            lore.add(lore("Iles exterieures uniquement.", NamedTextColor.DARK_GRAY));
+            lore.add(lore("Jamais sur l'ile du dragon.", NamedTextColor.DARK_GRAY));
+            lore.add(Component.empty());
+        }
+        if (findWorld(env) == null) {
+            lore.add(lore("Indisponible sur ce serveur.", NamedTextColor.RED));
+        } else {
+            lore.add(lore("Clique pour partir (" + WARMUP_SECONDS + "s)", NamedTextColor.YELLOW));
+        }
+        meta.lore(lore);
+
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private Component lore(String text, NamedTextColor color) {
+        return Component.text(text, color).decoration(TextDecoration.ITALIC, false);
+    }
+
+    @EventHandler
+    public void onDrag(InventoryDragEvent event) {
+        if (event.getInventory().getHolder() instanceof RtpMenu) event.setCancelled(true);
+    }
+
+    @EventHandler
+    public void onClick(InventoryClickEvent event) {
+        if (!(event.getInventory().getHolder() instanceof RtpMenu)) return;
+        event.setCancelled(true); // rien ne sort du menu
+
+        if (!(event.getWhoClicked() instanceof Player player)) return;
+        if (event.getClickedInventory() == null
+                || !(event.getClickedInventory().getHolder() instanceof RtpMenu)) return;
+
+        World.Environment env = switch (event.getSlot()) {
+            case SLOT_OVERWORLD -> World.Environment.NORMAL;
+            case SLOT_NETHER    -> World.Environment.NETHER;
+            case SLOT_END       -> World.Environment.THE_END;
+            default             -> null;
+        };
+        if (env == null) return;
+
+        player.closeInventory();
+        launch(player, env);
+    }
+
+    // --------------------------------------------------------------- lancement
+
+    private void launch(Player player, World.Environment env) {
+        if (!player.hasPermission("rtp.use")) {
+            player.sendMessage(msg("Vous n'avez pas la permission d'utiliser le RTP.", NamedTextColor.RED));
+            return;
+        }
+        if (warming.contains(player.getUniqueId())) {
+            player.sendMessage(msg("Une teleportation est deja en cours.", NamedTextColor.RED));
+            return;
+        }
+        if (isOnCooldown(player, true)) return;
+
+        World world = findWorld(env);
+        if (world == null) {
+            player.sendMessage(msg("Cette dimension n'est pas disponible sur ce serveur.", NamedTextColor.RED));
+            player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 1f, 0.6f);
             return;
         }
 
-        World world = player.getWorld();
+        player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 0.7f, 1.2f);
+        startWarmup(player, world);
+    }
+
+    /** Compte a rebours de 5 secondes : sons, titres, particules. Annule si le joueur bouge. */
+    private void startWarmup(Player player, World target) {
+        UUID id = player.getUniqueId();
+        warming.add(id);
+
+        final Location origin = player.getLocation().clone();
+        final String worldName = prettyName(target.getEnvironment());
+
+        new BukkitRunnable() {
+            int left = WARMUP_SECONDS;
+
+            @Override
+            public void run() {
+                if (!player.isOnline()) {
+                    warming.remove(id);
+                    cancel();
+                    return;
+                }
+
+                Location now = player.getLocation();
+                if (now.getWorld() != origin.getWorld() || now.distanceSquared(origin) > 4.0) {
+                    warming.remove(id);
+                    cancel();
+                    player.clearTitle();
+                    player.sendMessage(msg("Teleportation annulee : tu as bouge.", NamedTextColor.RED));
+                    player.playSound(now, Sound.BLOCK_NOTE_BLOCK_BASS, 1f, 0.6f);
+                    return;
+                }
+
+                if (left <= 0) {
+                    warming.remove(id);
+                    cancel();
+                    player.clearTitle();
+                    player.playSound(now, Sound.ENTITY_ENDERMAN_TELEPORT, 1f, 0.9f);
+                    now.getWorld().spawnParticle(Particle.PORTAL, now.clone().add(0, 1, 0), 80, 0.4, 1.0, 0.4, 0.6);
+                    player.sendMessage(msg("Recherche d'un endroit sur...", NamedTextColor.GRAY));
+                    tryTeleport(player, target, attemptsFor(target));
+                    return;
+                }
+
+                // Titre : gros chiffre + destination
+                player.showTitle(Title.title(
+                        Component.text(String.valueOf(left), colorFor(left)),
+                        Component.text("Destination : " + worldName, NamedTextColor.GRAY),
+                        Title.Times.times(Duration.ZERO, Duration.ofMillis(1200), Duration.ofMillis(200))));
+
+                // Petit "ding" d'xp, de plus en plus aigu
+                float pitch = 1.0f + (WARMUP_SECONDS - left) * 0.18f;
+                player.playSound(now, Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 0.8f, pitch);
+                player.playSound(now, Sound.BLOCK_NOTE_BLOCK_PLING, 0.5f, pitch);
+
+                // Spirale de particules autour du joueur
+                for (int i = 0; i < 12; i++) {
+                    double a = (Math.PI * 2 / 12) * i + (left * 0.4);
+                    double r = 0.9;
+                    Location p = now.clone().add(Math.cos(a) * r, 0.15 + (WARMUP_SECONDS - left) * 0.25, Math.sin(a) * r);
+                    now.getWorld().spawnParticle(Particle.END_ROD, p, 1, 0, 0, 0, 0);
+                }
+
+                left--;
+            }
+        }.runTaskTimer(getHost(), 0L, 20L);
+    }
+
+    // ------------------------------------------------------------ teleportation
+
+    /** Tente une teleportation ; recommence (chunk charge en async) tant qu'aucun endroit sur n'est trouve. */
+    private void tryTeleport(Player player, World world, int attemptsLeft) {
+        if (!player.isOnline()) return;
+        if (attemptsLeft <= 0) {
+            player.sendMessage(msg("Impossible de trouver un endroit sur, reessaie.", NamedTextColor.RED));
+            player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 1f, 0.6f);
+            return;
+        }
+
+        boolean vip = player.hasPermission("rtp.vip");
+        int min = vip ? VIP_MIN : BASIC_MIN;
+        int max = vip ? VIP_MAX : BASIC_MAX;
+
         double angle = Math.random() * Math.PI * 2;
         int dist = min + (int) (Math.random() * (max - min + 1));
         int x = (int) Math.round(Math.cos(angle) * dist);
         int z = (int) Math.round(Math.sin(angle) * dist);
 
-        // Chargement asynchrone du chunk (genere le terrain sans freeze).
+        // Securite : jamais l'ile principale de l'End (dragon / fontaine).
+        if (world.getEnvironment() == World.Environment.THE_END
+                && (long) x * x + (long) z * z < (long) END_FORBIDDEN_RADIUS * END_FORBIDDEN_RADIUS) {
+            tryTeleport(player, world, attemptsLeft - 1);
+            return;
+        }
+
         world.getChunkAtAsync(x >> 4, z >> 4, true).thenAccept(chunk ->
             Bukkit.getScheduler().runTask(getHost(), () -> {
                 if (!player.isOnline()) return;
                 Integer y = findSafeY(world, x, z);
                 if (y != null) {
-                    Location loc = new Location(world, x + 0.5, y, z + 0.5);
+                    Location loc = new Location(world, x + 0.5, y, z + 0.5, player.getLocation().getYaw(), 0f);
                     player.teleport(loc);
                     cooldowns.put(player.getUniqueId(), System.currentTimeMillis());
-                    player.sendMessage(msg("Teleporte a " + x + ", " + y + ", " + z
-                            + "  (" + dist + " blocks du centre).", NamedTextColor.GREEN));
+                    arrivalEffects(player, loc, dist);
                 } else {
-                    tryTeleport(player, min, max, attemptsLeft - 1);
+                    tryTeleport(player, world, attemptsLeft - 1);
                 }
             })
         );
+    }
+
+    /** Sons + particules + titre a l'arrivee. */
+    private void arrivalEffects(Player player, Location loc, int dist) {
+        World w = loc.getWorld();
+        w.spawnParticle(Particle.PORTAL, loc.clone().add(0, 1, 0), 120, 0.5, 1.0, 0.5, 0.8);
+        w.spawnParticle(Particle.END_ROD, loc.clone().add(0, 1, 0), 40, 0.3, 0.6, 0.3, 0.12);
+        w.spawnParticle(Particle.CLOUD, loc, 25, 0.4, 0.1, 0.4, 0.05);
+
+        player.playSound(loc, Sound.ENTITY_PLAYER_LEVELUP, 1f, 1.2f);
+        player.playSound(loc, Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1f, 1.6f);
+        player.playSound(loc, Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 1.1f);
+
+        player.showTitle(Title.title(
+                Component.text("Bon voyage !", NamedTextColor.AQUA),
+                Component.text(prettyName(w.getEnvironment()) + " - " + fmt(dist) + " blocks du centre", NamedTextColor.GRAY),
+                Title.Times.times(Duration.ofMillis(200), Duration.ofMillis(1600), Duration.ofMillis(400))));
+
+        player.sendMessage(msg("Teleporte a " + loc.getBlockX() + ", " + loc.getBlockY() + ", " + loc.getBlockZ()
+                + "  (" + fmt(dist) + " blocks du centre).", NamedTextColor.GREEN));
+    }
+
+    // ---------------------------------------------------------------- utilitaires
+
+    private int attemptsFor(World world) {
+        return switch (world.getEnvironment()) {
+            case THE_END -> 120; // beaucoup de void, il faut insister
+            case NETHER  -> 60;
+            default      -> 40;
+        };
+    }
+
+    private World findWorld(World.Environment env) {
+        for (World w : Bukkit.getWorlds()) {
+            if (w.getEnvironment() == env) return w;
+        }
+        return null;
+    }
+
+    private boolean isOnCooldown(Player player, boolean notify) {
+        if (player.hasPermission("rtp.cooldown.bypass")) return false;
+        Long last = cooldowns.get(player.getUniqueId());
+        if (last == null) return false;
+        long now = System.currentTimeMillis();
+        if (now - last >= COOLDOWN_MS) return false;
+        if (notify) {
+            long remain = (COOLDOWN_MS - (now - last)) / 1000L;
+            player.sendMessage(msg("Patiente encore " + formatTime(remain) + " avant un nouveau /rtp.", NamedTextColor.RED));
+            player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 1f, 0.6f);
+        }
+        return true;
     }
 
     /** Trouve une hauteur sure a (x,z), ou null si rien de sur. */
@@ -109,6 +383,8 @@ public class RandomTeleport extends LoadedPlugin {
             return null;
         }
         int top = world.getHighestBlockYAt(x, z);
+        if (top <= world.getMinHeight()) return null;                  // colonne vide (void de l'End)
+        if (world.getBlockAt(x, top, z).getType().isAir()) return null;
         return isSafe(world, x, top + 1, z) ? top + 1 : null;
     }
 
@@ -121,10 +397,29 @@ public class RandomTeleport extends LoadedPlugin {
         if (!ground.getType().isSolid()) return false;
         Material g = ground.getType();
         if (g == Material.LAVA || g == Material.WATER || g == Material.MAGMA_BLOCK
-                || g == Material.CACTUS || g == Material.FIRE || g == Material.CAMPFIRE) return false;
+                || g == Material.CACTUS || g == Material.FIRE || g == Material.CAMPFIRE
+                || g == Material.SOUL_CAMPFIRE || g == Material.POWDER_SNOW) return false;
         if (!feet.isPassable() || !head.isPassable()) return false;
         Material f = feet.getType();
         return f != Material.LAVA && f != Material.WATER && f != Material.FIRE;
+    }
+
+    private NamedTextColor colorFor(int secondsLeft) {
+        if (secondsLeft <= 1) return NamedTextColor.GREEN;
+        if (secondsLeft <= 3) return NamedTextColor.YELLOW;
+        return NamedTextColor.AQUA;
+    }
+
+    private String prettyName(World.Environment env) {
+        return switch (env) {
+            case NETHER  -> "Nether";
+            case THE_END -> "End";
+            default      -> "Overworld";
+        };
+    }
+
+    private String fmt(int n) {
+        return String.format("%,d", n).replace(',', ' ');
     }
 
     private String formatTime(long seconds) {
@@ -135,10 +430,5 @@ public class RandomTeleport extends LoadedPlugin {
 
     private Component msg(String text, NamedTextColor color) {
         return Component.text(text).color(color);
-    }
-
-    @Override
-    public void onDisable() {
-        getLogger().info("RandomTeleport desactive.");
     }
 }
