@@ -187,7 +187,7 @@ public class RandomTeleport extends LoadedPlugin {
                 Component.text("RTP - Choisis ta destination", NamedTextColor.DARK_PURPLE));
         holder.inventory = inv;
 
-        inv.setItem(SLOT_OVERWORLD, icon(Material.DIRT, "Overworld", NamedTextColor.GREEN,
+        inv.setItem(SLOT_OVERWORLD, icon(Material.GRASS_BLOCK, "Overworld", NamedTextColor.GREEN,
                 World.Environment.NORMAL, min, max, vip));
         inv.setItem(SLOT_NETHER, icon(Material.NETHERRACK, "Nether", NamedTextColor.RED,
                 World.Environment.NETHER, min, max, vip));
