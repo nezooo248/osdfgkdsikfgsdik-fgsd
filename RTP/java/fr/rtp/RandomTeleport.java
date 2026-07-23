@@ -206,6 +206,8 @@ public class RandomTeleport extends LoadedPlugin {
 
     private ItemStack icon(Material mat, String name, NamedTextColor color,
                            World.Environment env, int min, int max, boolean vip) {
+        World world = findWorld(env);
+
         ItemStack item = new ItemStack(mat);
         ItemMeta meta = item.getItemMeta();
 
@@ -214,15 +216,20 @@ public class RandomTeleport extends LoadedPlugin {
                 .decoration(TextDecoration.BOLD, true));
 
         List<Component> lore = new ArrayList<>();
-        lore.add(lore("Distance : " + fmt(min) + " -> " + fmt(max) + " blocks", NamedTextColor.GRAY));
-        lore.add(lore(vip ? "Rang : VIP" : "Rang : basique", vip ? NamedTextColor.GOLD : NamedTextColor.DARK_GRAY));
+
+        // Infos live sur la dimension
+        lore.add(kv("\u1d0a\u1d0f\u1d1c\u1d07\u1d1c\u0280", world == null ? "-" : String.valueOf(world.getPlayers().size()), color));
+        lore.add(kv("\u1d0d\u1d00\u1d18", world == null ? "-" : mapSize(world), color));
+        lore.add(kv("\u1d05\u026a\ua731\u1d1b\u1d00\u0274\u1d04\u1d07", fmt(min) + " - " + fmt(max), color));
+        lore.add(kv("\u0280\u1d00\u0274\u0262", vip ? "VIP" : "basique", color));
         lore.add(Component.empty());
+
         if (env == World.Environment.THE_END) {
             lore.add(lore("Iles exterieures uniquement.", NamedTextColor.DARK_GRAY));
             lore.add(lore("Jamais sur l'ile du dragon.", NamedTextColor.DARK_GRAY));
             lore.add(Component.empty());
         }
-        if (findWorld(env) == null) {
+        if (world == null) {
             lore.add(lore("Indisponible sur ce serveur.", NamedTextColor.RED));
         } else {
             lore.add(lore("Clique pour partir (" + WARMUP_SECONDS + "s)", NamedTextColor.YELLOW));
@@ -231,6 +238,29 @@ public class RandomTeleport extends LoadedPlugin {
 
         item.setItemMeta(meta);
         return item;
+    }
+
+    /** Ligne de description : "\u029f\u1d00\u0299\u1d07\u029f\ufe55 valeur" */
+    private Component kv(String label, String value, NamedTextColor color) {
+        return Component.text(label + "\ufe55 ", NamedTextColor.DARK_GRAY)
+                .decoration(TextDecoration.ITALIC, false)
+                .append(Component.text(value, color).decoration(TextDecoration.ITALIC, false));
+    }
+
+    /** Taille de la map d'apres la worldborder, ex : "25k x 25k". */
+    private String mapSize(World world) {
+        double size = world.getWorldBorder().getSize();
+        if (size >= 29_999_984d) return "illimitee";
+        String side = shortNum(size);
+        return side + " x " + side;
+    }
+
+    /** 25000 -> "25k", 1500 -> "1.5k", 800 -> "800". */
+    private String shortNum(double blocks) {
+        if (blocks < 1000d) return String.valueOf(Math.round(blocks));
+        double k = blocks / 1000d;
+        if (Math.abs(k - Math.rint(k)) < 0.05d) return Math.round(k) + "k";
+        return String.format(java.util.Locale.ROOT, "%.1fk", k);
     }
 
     private Component lore(String text, NamedTextColor color) {
