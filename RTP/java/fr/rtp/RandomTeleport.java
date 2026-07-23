@@ -184,14 +184,14 @@ public class RandomTeleport extends LoadedPlugin {
 
         RtpMenu holder = new RtpMenu();
         Inventory inv = Bukkit.createInventory(holder, 27,
-                Component.text("RTP - Choisis ta destination", NamedTextColor.DARK_PURPLE));
+                Component.text("RTP", NamedTextColor.DARK_PURPLE));
         holder.inventory = inv;
 
-        inv.setItem(SLOT_OVERWORLD, icon(Material.GRASS_BLOCK, "Overworld", NamedTextColor.GREEN,
+        inv.setItem(SLOT_OVERWORLD, icon(Material.GRASS_BLOCK, "ᴏᴠᴇʀᴡᴏʀʟᴅ", NamedTextColor.GREEN,
                 World.Environment.NORMAL, min, max, vip));
-        inv.setItem(SLOT_NETHER, icon(Material.NETHERRACK, "Nether", NamedTextColor.RED,
+        inv.setItem(SLOT_NETHER, icon(Material.NETHERRACK, "ɴᴇᴛʜᴇʀ", NamedTextColor.RED,
                 World.Environment.NETHER, min, max, vip));
-        inv.setItem(SLOT_END, icon(Material.END_STONE, "End", NamedTextColor.LIGHT_PURPLE,
+        inv.setItem(SLOT_END, icon(Material.END_STONE, "ᴇɴᴅ", NamedTextColor.LIGHT_PURPLE,
                 World.Environment.THE_END, min, max, vip));
 
         try {
